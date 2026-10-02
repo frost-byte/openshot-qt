@@ -147,6 +147,22 @@ class SceneCastWidgetTests(unittest.TestCase):
         self.assertEqual(entry.get("group"), None)
         self.assertFalse(dlg._scene_cast_entries)
 
+    # ---- default tab on template selection ----
+
+    def test_scene_cast_template_defaults_to_reference_tab_not_prompt(self):
+        """The Prompt tab is inert for a scene_cast-grouped template -- opening/selecting
+        one should land on the Reference tab (where "Edit Cast..." lives), not an empty
+        Prompt box the user has nothing to do with."""
+        dlg = GenerateMediaDialog(templates=_scene_cast_template())
+        self.assertIs(dlg.tabs.currentWidget(), dlg.page_reference)
+
+    def test_non_scene_cast_template_still_defaults_to_prompt_tab(self):
+        templates = [{"id": "t2", "name": "Plain", "template": {"extra_inputs": [
+            {"key": "some_text", "type": "text", "label": "Some Text"},
+        ]}}]
+        dlg = GenerateMediaDialog(templates=templates)
+        self.assertIs(dlg.tabs.currentWidget(), dlg.page_prompt)
+
     # ---- pre-fill ----
 
     def test_prefill_resolver_called_once_and_populates_widgets(self):

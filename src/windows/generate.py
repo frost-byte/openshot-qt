@@ -675,7 +675,14 @@ class GenerateMediaDialog(QDialog):
             self._set_tab_visible(self.prompt_tab_index, True)
             self._set_tab_visible(self.points_tab_index, False)
             self._set_tab_visible(self.highlight_tab_index, False)
-            self.tabs.setCurrentWidget(self.page_prompt)
+            if self._scene_cast_entries:
+                # The Prompt field is inert for a scene_cast-grouped template (the real
+                # creative direction lives in the Composition itself) -- default to the
+                # Reference tab's "Edit Cast..." widget instead of landing on an empty
+                # Prompt box the user has nothing to do with.
+                self.tabs.setCurrentWidget(self.page_reference)
+            else:
+                self.tabs.setCurrentWidget(self.page_prompt)
 
     def _populate_media_combo(self, combo, media_type):
         """Populate `combo` with every Project Files entry matching `media_type`
