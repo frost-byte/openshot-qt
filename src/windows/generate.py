@@ -43,6 +43,16 @@ from classes.thumbnail import GetThumbPath
 from classes.query import File
 from windows.region import SelectRegion
 from windows.color_picker import ColorPicker
+from windows.scene_cast_builder import SceneCastBuilderDialog
+
+# Fallback values for a "scene_cast" grouped extra_inputs entry that doesn't declare its own
+# "default" -- cast_entries_json/composition_overrides_json must always be valid JSON since the
+# ComfyUI SceneCastBuild node parses them unconditionally.
+_SCENE_CAST_KEY_DEFAULTS = {
+    "composition_name": "",
+    "cast_entries_json": "[]",
+    "composition_overrides_json": "{}",
+}
 
 
 class GenerateMediaDialog(QDialog):
@@ -59,6 +69,8 @@ class GenerateMediaDialog(QDialog):
         dialog_title=None,
         parent=None,
         default_name=None,
+        fbtools_client=None,
+        cast_metadata_resolver=None,
     ):
         super().__init__(parent)
         self.source_file = source_file
@@ -69,6 +81,16 @@ class GenerateMediaDialog(QDialog):
             for t in self.templates
         }
         self.preselected_template_id = str(preselected_template_id or "").strip()
+        # fbtools_client: an FBToolsClient (or None) the Scene Cast builder dialog uses to list
+        # Compositions/Bundles/Subjects/Backgrounds. cast_metadata_resolver: an optional zero-arg
+        # callable returning a resolved cast-metadata dict (see classes/clip_cast_metadata.py) for
+        # `source_file`, used to pre-fill the Scene Cast summary the first time a scene_cast-group
+        # template is selected -- kept as an injected callable (rather than this dialog importing
+        # clip_cast_metadata/fbtools_client itself) so this file stays free of I/O concerns.
+        self.fbtools_client = fbtools_client
+        self._cast_metadata_resolver = cast_metadata_resolver
+        self._scene_cast_prefill_attempted = False
+        self._scene_cast_entries = {}
         self._coordinates_positive_text = ""
         self._coordinates_negative_text = ""
         self._rectangles_positive_text = ""
@@ -229,9 +251,22 @@ class GenerateMediaDialog(QDialog):
         declared extra_inputs: one file combo per image/video/audio entry (same
         Project-Files-backed pattern the original single reference-image combo used),
         or a text field for a "text" entry.
+
+        Entries sharing `"group": "scene_cast"` are a special case: rather than one
+        QLineEdit per entry, they're rendered as a single summary row + "Edit Cast..."
+        button backed by SceneCastBuilderDialog (see _build_scene_cast_widgets). A
+        template without this hint, or an older build that doesn't recognize it, falls
+        through to the plain per-entry "text" rendering below -- still works, just a
+        plain JSON text field instead of the richer builder.
         """
         self._clear_extra_input_widgets()
-        for entry in extra_inputs:
+        self._scene_cast_entries = {}
+        scene_cast_entries = [e for e in extra_inputs if e.get("group") == "scene_cast"]
+        remaining_entries = [e for e in extra_inputs if e.get("group") != "scene_cast"]
+        if scene_cast_entries:
+            self._build_scene_cast_widgets(scene_cast_entries)
+
+        for entry in remaining_entries:
             key = entry.get("key", "")
             entry_type = entry.get("type", "")
             label = entry.get("label") or key
@@ -256,6 +291,120 @@ class GenerateMediaDialog(QDialog):
                 self._populate_media_combo(widget, entry_type)
             self._extra_input_form.addRow(label, widget)
             self._extra_input_widgets[key] = (widget, entry)
+
+    def _build_scene_cast_widgets(self, entries):
+        """Build the grouped Scene Cast widget: one hidden QLineEdit per declared key (so
+        _collect_extra_input_values()/_first_missing_required_input() need no special-casing --
+        each still looks exactly like an ordinary "text" extra_inputs entry) plus a single
+        visible summary row with an "Edit Cast..." button that opens SceneCastBuilderDialog.
+        """
+        for entry in entries:
+            key = entry.get("key", "")
+            if not key:
+                continue
+            widget = QLineEdit()
+            widget.setVisible(False)
+            default_value = entry.get("default")
+            if not (isinstance(default_value, str) and default_value):
+                default_value = _SCENE_CAST_KEY_DEFAULTS.get(key, "")
+            widget.setText(default_value)
+            self._extra_input_widgets[key] = (widget, entry)
+            self._scene_cast_entries[key] = widget
+
+        row = QWidget(self)
+        row_layout = QHBoxLayout(row)
+        row_layout.setContentsMargins(0, 0, 0, 0)
+        self.scene_cast_summary_label = QLabel()
+        self.scene_cast_summary_label.setWordWrap(True)
+        edit_button = QPushButton("Edit Cast...")
+        edit_button.clicked.connect(self._edit_scene_cast_clicked)
+        row_layout.addWidget(self.scene_cast_summary_label, 1)
+        row_layout.addWidget(edit_button, 0)
+        label_text = entries[0].get("group_label") or "Scene Cast"
+        self._extra_input_form.addRow(label_text, row)
+        self._refresh_scene_cast_summary()
+        self._maybe_prefill_scene_cast()
+
+    def _edit_scene_cast_clicked(self):
+        composition_widget = self._scene_cast_entries.get("composition_name")
+        cast_widget = self._scene_cast_entries.get("cast_entries_json")
+        overrides_widget = self._scene_cast_entries.get("composition_overrides_json")
+
+        dlg = SceneCastBuilderDialog(
+            fbtools_client=self.fbtools_client,
+            composition_name=composition_widget.text() if composition_widget else "",
+            cast_entries_json=cast_widget.text() if cast_widget else "[]",
+            composition_overrides_json=overrides_widget.text() if overrides_widget else "{}",
+            parent=self,
+        )
+        if dlg.exec_() != QDialog.Accepted:
+            return
+        if composition_widget is not None:
+            composition_widget.setText(dlg.composition_name())
+        if cast_widget is not None:
+            cast_widget.setText(dlg.cast_entries_json())
+        if overrides_widget is not None:
+            overrides_widget.setText(dlg.composition_overrides_json())
+        self._refresh_scene_cast_summary()
+
+    def _refresh_scene_cast_summary(self):
+        if not hasattr(self, "scene_cast_summary_label"):
+            return
+        composition_widget = self._scene_cast_entries.get("composition_name")
+        cast_widget = self._scene_cast_entries.get("cast_entries_json")
+        composition_name = composition_widget.text().strip() if composition_widget else ""
+        try:
+            raw_entries = json.loads(cast_widget.text()) if cast_widget and cast_widget.text().strip() else []
+        except Exception:
+            raw_entries = []
+        if not isinstance(raw_entries, list):
+            raw_entries = []
+
+        parts = []
+        if composition_name:
+            parts.append("Composition: {}".format(composition_name))
+        for cast_entry in raw_entries:
+            if not isinstance(cast_entry, dict):
+                continue
+            marker = "★ " if cast_entry.get("primary") else ""
+            parts.append("{}{}: {}".format(
+                marker, cast_entry.get("subject_id", "?"), cast_entry.get("bundle_id", "?"),
+            ))
+        self.scene_cast_summary_label.setText(" · ".join(parts) if parts else "No cast selected.")
+
+    def _maybe_prefill_scene_cast(self):
+        """Best-effort, one-time pre-fill of the Scene Cast widget from the selected source
+        file's own embedded generation metadata (see classes/clip_cast_metadata.py) -- lets a
+        user re-generate starting from the same Composition/Subject/Bundle an existing clip was
+        built from, without retyping it. Runs at most once per dialog lifetime (not on every
+        template switch) since both steps involve real I/O (a local ffprobe shell-out, then an
+        HTTP call to fbTools). Any failure/absence leaves the widget exactly as it started --
+        this is pure convenience, never a hard requirement for the dialog to work.
+        """
+        if self._scene_cast_prefill_attempted or not callable(self._cast_metadata_resolver):
+            return
+        self._scene_cast_prefill_attempted = True
+        try:
+            result = self._cast_metadata_resolver()
+        except Exception as ex:
+            log.debug("GenerateMediaDialog scene-cast pre-fill failed: %s", ex)
+            return
+        if not isinstance(result, dict):
+            return
+
+        composition_widget = self._scene_cast_entries.get("composition_name")
+        cast_widget = self._scene_cast_entries.get("cast_entries_json")
+        composition_name = str(result.get("composition_name") or "").strip()
+        primary_subject = str(result.get("primary_subject") or "").strip()
+        primary_bundle = str(result.get("primary_bundle") or "").strip()
+
+        if composition_widget is not None and composition_name:
+            composition_widget.setText(composition_name)
+        if cast_widget is not None and primary_subject and primary_bundle:
+            cast_widget.setText(json.dumps([
+                {"subject_id": primary_subject, "bundle_id": primary_bundle, "primary": True},
+            ]))
+        self._refresh_scene_cast_summary()
 
     def _collect_extra_input_values(self):
         """Read the current Reference-tab widgets back into the two payload dicts

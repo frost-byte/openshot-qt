@@ -47,6 +47,8 @@ from classes.comfy_client import ComfyClient
 from classes.comfy_templates import ComfyTemplateRegistry
 from classes.logger import log
 from classes.clip_render import render_clip_to_file
+from classes.clip_cast_metadata import probe_cast_metadata, resolve_cast_metadata
+from classes.fbtools_client import FBToolsClient
 from classes.query import File, Clip
 from windows.generate import GenerateMediaDialog
 
@@ -119,6 +121,50 @@ class GenerationService(QObject):
     def comfy_ui_url(self):
         url = get_app().get_settings().get("comfy-ui-url") or "http://127.0.0.1:8188"
         return str(url).strip().rstrip("/")
+
+    def fbtools_client(self):
+        """An FBToolsClient for fbTools' custom-node REST endpoints -- served by the same
+        ComfyUI instance comfy_ui_url() already targets, so no separate config is needed."""
+        return FBToolsClient(self.comfy_ui_url())
+
+    def _cast_metadata_resolver_for(self, source_file):
+        """Build the lazy, best-effort callable GenerateMediaDialog's Scene Cast widget uses to
+        pre-fill from `source_file`'s own embedded generation metadata (classes/
+        clip_cast_metadata.py) -- None when there's no real file to probe, which the dialog
+        already treats as "nothing to pre-fill". Deferred to a closure (rather than probing
+        eagerly here) since this is only ever needed if the user actually selects a
+        scene_cast-group template."""
+        if source_file is None:
+            return None
+        path = str((source_file.data or {}).get("path", "")).strip()
+        if not path:
+            return None
+
+        def _resolve():
+            blob = probe_cast_metadata(path)
+            if blob is None:
+                return None
+            return resolve_cast_metadata(self.fbtools_client(), blob)
+
+        return _resolve
+
+    def generate_from_scene_cast_for_clip(self, clip):
+        """Entry point for the timeline's single-clip "Generate From Scene Cast..." action:
+        resolve the clip back to its backing Project Files File and reuse the normal Generate
+        dialog flow (action_generate_trigger) for it -- exactly as if the user had selected that
+        File in Project Files and clicked "Generate...". The only thing new here is making that
+        flow reachable from a timeline clip, so GenerateMediaDialog's Scene Cast pre-fill sees
+        the clip's own source file and can read back whichever Composition/Subject/Bundle
+        generated it (see _cast_metadata_resolver_for)."""
+        file_id = clip.data.get("file_id") if isinstance(getattr(clip, "data", None), dict) else None
+        file_obj = File.get(id=file_id) if file_id else None
+        if not file_obj:
+            QMessageBox.warning(
+                self.win, "Generate From Scene Cast",
+                "Could not find this clip's source file in Project Files.",
+            )
+            return
+        self.action_generate_trigger(source_file=file_obj)
 
     def shutdown(self):
         if getattr(self, "_comfy_check_thread", None):
@@ -1353,6 +1399,7 @@ class GenerationService(QObject):
             dialog_title="Bridge Clips With AI",
             parent=self.win,
             default_name=self._default_generation_name(file_a),
+            fbtools_client=self.fbtools_client(),
         )
         self._preselect_bridge_second_video_input(win, file_b.id)
         win.template_combo.currentIndexChanged.connect(
@@ -1395,6 +1442,8 @@ class GenerationService(QObject):
                 dialog_title=dialog_title,
                 parent=self.win,
                 default_name=self._default_generation_name(primary_source_file),
+                fbtools_client=self.fbtools_client(),
+                cast_metadata_resolver=self._cast_metadata_resolver_for(primary_source_file),
             )
             if win.exec_() != QDialog.Accepted:
                 return

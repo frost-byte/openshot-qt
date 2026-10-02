@@ -424,6 +424,17 @@ class ComfyTemplateRegistry:
 
             seen_keys.add(key)
             parsed_entry = {"key": key, "type": entry_type, "label": label, "required": required}
+            # "group"/"group_label" are a pure dialog-rendering hint (e.g. GenerateMediaDialog's
+            # Scene Cast widget groups several "text" entries into one builder-backed row instead
+            # of one QLineEdit each) -- not interpreted here or by generation_service.py's
+            # substitution logic, which only ever cares about "key"/"type". Passed through
+            # as-is so a template author can opt a set of entries into that richer widget.
+            group = str(entry.get("group", "")).strip()
+            if group:
+                parsed_entry["group"] = group
+                group_label = str(entry.get("group_label", "")).strip()
+                if group_label:
+                    parsed_entry["group_label"] = group_label
             if entry_type == "text":
                 default_value = entry.get("default")
                 if isinstance(default_value, str) and default_value:

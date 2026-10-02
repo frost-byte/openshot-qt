@@ -1694,6 +1694,16 @@ class TimelineView(updates.UpdateInterface, ViewClass):
             Bridge_Clips = menu.addAction(_("Bridge Clips With AI..."))
             Bridge_Clips.triggered.connect(partial(self.BridgeClipsWithAI_Triggered, bridge_pair[0], bridge_pair[1]))
 
+        # From-scratch AI generation driven by fbTools' Scene Cast system: only offered for a
+        # single selected clip (unlike the two-clip bridge above). Opens the normal Generate
+        # dialog for that clip's own source file -- if the clip's embedded metadata identifies
+        # the Composition/Subject/Bundle that originally generated it, the Scene Cast widget
+        # pre-fills from that; the user can still reassign anything before generating.
+        single_clip = self._single_selected_clip(clip_ids, tran_ids)
+        if single_clip:
+            Generate_Scene_Cast = menu.addAction(_("Generate From Scene Cast..."))
+            Generate_Scene_Cast.triggered.connect(partial(self.GenerateFromSceneCast_Triggered, single_clip))
+
         menu.addSeparator()
 
         # Alignment Menu (if multiple selections)
@@ -2332,6 +2342,21 @@ class TimelineView(updates.UpdateInterface, ViewClass):
         two-clip AI bridge template -- see GenerationService.bridge_clips_with_ai()
         for the full render/import/dialog/insert orchestration."""
         self.window.generation_service.bridge_clips_with_ai(clip_a, clip_b)
+
+    def _single_selected_clip(self, clip_ids, tran_ids):
+        """Return the Clip object if the selection is exactly one clip (no
+        transitions), or None otherwise -- the only shape "Generate From Scene
+        Cast..." makes sense for."""
+        if tran_ids or len(clip_ids or []) != 1:
+            return None
+        clip = Clip.get(id=clip_ids[0])
+        return clip if clip and isinstance(clip.data, dict) else None
+
+    def GenerateFromSceneCast_Triggered(self, clip):
+        """Open the normal Generate dialog for this clip's own source file -- see
+        GenerationService.generate_from_scene_cast_for_clip() for how the clip
+        resolves back to a Project Files File."""
+        self.window.generation_service.generate_from_scene_cast_for_clip(clip)
 
     def _selection_frame_range(self, clip_ids, tran_ids):
         """Return (start_frame, end_frame), 1-based and inclusive, spanning every

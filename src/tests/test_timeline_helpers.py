@@ -6869,6 +6869,47 @@ class TimelineHelperTests(unittest.TestCase):
         timeline_module.TimelineView.BridgeClipsWithAI_Triggered(helper, clip_a, clip_b)
         self.assertEqual(calls, [(clip_a, clip_b)])
 
+    def test_single_selected_clip_returns_the_one_clip(self):
+        timeline_module = self.timeline_module
+        clip_a = types.SimpleNamespace(id="A", data={"position": 0.0})
+        helper = types.SimpleNamespace()
+        with patch.object(timeline_module.Clip, "get", side_effect=lambda id: {"A": clip_a}.get(id)):
+            result = timeline_module.TimelineView._single_selected_clip(helper, ["A"], [])
+        self.assertIs(result, clip_a)
+
+    def test_single_selected_clip_none_when_transitions_selected(self):
+        timeline_module = self.timeline_module
+        helper = types.SimpleNamespace()
+        result = timeline_module.TimelineView._single_selected_clip(helper, ["A"], ["T1"])
+        self.assertIsNone(result)
+
+    def test_single_selected_clip_none_unless_exactly_one_clip(self):
+        timeline_module = self.timeline_module
+        helper = types.SimpleNamespace()
+        self.assertIsNone(timeline_module.TimelineView._single_selected_clip(helper, [], []))
+        self.assertIsNone(timeline_module.TimelineView._single_selected_clip(helper, ["A", "B"], []))
+
+    def test_single_selected_clip_none_when_clip_id_does_not_resolve(self):
+        timeline_module = self.timeline_module
+        helper = types.SimpleNamespace()
+        with patch.object(timeline_module.Clip, "get", return_value=None):
+            result = timeline_module.TimelineView._single_selected_clip(helper, ["missing"], [])
+        self.assertIsNone(result)
+
+    def test_generate_from_scene_cast_triggered_delegates_to_generation_service(self):
+        timeline_module = self.timeline_module
+        clip = types.SimpleNamespace(id="A")
+        calls = []
+        helper = types.SimpleNamespace(
+            window=types.SimpleNamespace(
+                generation_service=types.SimpleNamespace(
+                    generate_from_scene_cast_for_clip=lambda c: calls.append(c),
+                ),
+            ),
+        )
+        timeline_module.TimelineView.GenerateFromSceneCast_Triggered(helper, clip)
+        self.assertEqual(calls, [clip])
+
     def test_save_selection_as_clip_opens_export_prefilled_with_frame_range(self):
         timeline_module = self.timeline_module
         helper = types.SimpleNamespace(

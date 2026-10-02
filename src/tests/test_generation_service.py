@@ -741,6 +741,7 @@ class GenerationServiceTests(unittest.TestCase):
         bridge_template = {"id": "video-bridge", "template": {"extra_inputs": [{"key": "clip_b", "type": "video"}]}}
         service.templates_for_context = lambda source_file=None: [bridge_template]
         service._default_generation_name = lambda file_obj: "bridge_gen1"
+        service.comfy_ui_url = lambda: "http://localhost:8188"
 
         file_a = types.SimpleNamespace(id="FA", data={"path": "/tmp/bridge/clip_a.mp4"})
         file_b = types.SimpleNamespace(id="FB", data={"path": "/tmp/bridge/clip_b.mp4"})
@@ -789,6 +790,7 @@ class GenerationServiceTests(unittest.TestCase):
         bridge_template = {"id": "video-bridge", "template": {"extra_inputs": [{"key": "clip_b", "type": "video"}]}}
         service.templates_for_context = lambda source_file=None: [bridge_template]
         service._default_generation_name = lambda file_obj: "bridge_gen1"
+        service.comfy_ui_url = lambda: "http://localhost:8188"
 
         file_a = types.SimpleNamespace(id="FA", data={"path": "/tmp/bridge/clip_a.mp4"})
         file_b = types.SimpleNamespace(id="FB", data={"path": "/tmp/bridge/clip_b.mp4"})
@@ -820,6 +822,7 @@ class GenerationServiceTests(unittest.TestCase):
         bridge_template = {"id": "video-bridge", "template": {"extra_inputs": [{"key": "clip_b", "type": "video"}]}}
         service.templates_for_context = lambda source_file=None: [bridge_template]
         service._default_generation_name = lambda file_obj: "bridge_gen1"
+        service.comfy_ui_url = lambda: "http://localhost:8188"
 
         file_a = types.SimpleNamespace(id="FA", data={"path": "/tmp/bridge/clip_a.mp4"})
         file_b = types.SimpleNamespace(id="FB", data={"path": "/tmp/bridge/clip_b.mp4"})
@@ -843,6 +846,109 @@ class GenerationServiceTests(unittest.TestCase):
         # preselect, so picking a different qualifying template still fills
         # Clip B in rather than leaving it to the user to notice and redo.
         dialog_instance.template_combo.currentIndexChanged.connect.assert_called_once()
+
+    # ---- fbtools_client / Scene Cast pre-fill wiring ----
+
+    def test_fbtools_client_uses_comfy_ui_url(self):
+        service = GenerationService.__new__(GenerationService)
+        service.comfy_ui_url = lambda: "http://localhost:8188"
+        client = service.fbtools_client()
+        self.assertEqual(client.base_url, "http://localhost:8188")
+
+    def test_cast_metadata_resolver_for_none_source_file_returns_none(self):
+        service = GenerationService.__new__(GenerationService)
+        self.assertIsNone(service._cast_metadata_resolver_for(None))
+
+    def test_cast_metadata_resolver_for_file_without_path_returns_none(self):
+        service = GenerationService.__new__(GenerationService)
+        file_obj = types.SimpleNamespace(data={})
+        self.assertIsNone(service._cast_metadata_resolver_for(file_obj))
+
+    def test_cast_metadata_resolver_for_calls_probe_then_resolve(self):
+        service = GenerationService.__new__(GenerationService)
+        service.comfy_ui_url = lambda: "http://localhost:8188"
+        file_obj = types.SimpleNamespace(data={"path": "/media/clip.mp4"})
+
+        with patch("classes.generation_service.probe_cast_metadata", return_value={"prompt_graph": {}}) as probe, \
+                patch("classes.generation_service.resolve_cast_metadata", return_value={"composition_name": "wide_shot"}) as resolve:
+            resolver = service._cast_metadata_resolver_for(file_obj)
+            result = resolver()
+
+        probe.assert_called_once_with("/media/clip.mp4")
+        resolve.assert_called_once()
+        self.assertEqual(resolve.call_args[0][1], {"prompt_graph": {}})
+        self.assertEqual(result, {"composition_name": "wide_shot"})
+
+    def test_cast_metadata_resolver_short_circuits_when_probe_finds_nothing(self):
+        service = GenerationService.__new__(GenerationService)
+        service.comfy_ui_url = lambda: "http://localhost:8188"
+        file_obj = types.SimpleNamespace(data={"path": "/media/clip.mp4"})
+
+        with patch("classes.generation_service.probe_cast_metadata", return_value=None), \
+                patch("classes.generation_service.resolve_cast_metadata") as resolve:
+            resolver = service._cast_metadata_resolver_for(file_obj)
+            result = resolver()
+
+        resolve.assert_not_called()
+        self.assertIsNone(result)
+
+    def test_action_generate_trigger_open_dialog_passes_fbtools_client_and_resolver(self):
+        service = GenerationService.__new__(GenerationService)
+        service.win = types.SimpleNamespace(selected_files=lambda: [])
+        service.is_comfy_available = lambda force=False: True
+        service.templates_for_context = lambda source_file=None: []
+        service._selected_generation_targets = lambda source_file=None: [source_file] if source_file else []
+        service._default_generation_name = lambda file_obj: "gen1"
+        service.comfy_ui_url = lambda: "http://localhost:8188"
+
+        file_obj = types.SimpleNamespace(id="F1", data={"path": "/media/clip.mp4"})
+        dialog_instance = MagicMock()
+        dialog_instance.exec_.return_value = QDialog.Rejected
+        dialog_cls = MagicMock(return_value=dialog_instance)
+
+        with patch("classes.generation_service.GenerateMediaDialog", dialog_cls):
+            service.action_generate_trigger(source_file=file_obj)
+
+        dialog_cls.assert_called_once()
+        _args, kwargs = dialog_cls.call_args
+        self.assertIsInstance(kwargs["fbtools_client"], type(service.fbtools_client()))
+        self.assertTrue(callable(kwargs["cast_metadata_resolver"]))
+
+    def test_generate_from_scene_cast_for_clip_resolves_file_and_delegates(self):
+        service = GenerationService.__new__(GenerationService)
+        file_obj = types.SimpleNamespace(id="F1", data={"path": "/media/clip.mp4"})
+        clip = types.SimpleNamespace(data={"file_id": "F1"})
+        triggered = []
+        service.action_generate_trigger = lambda source_file=None: triggered.append(source_file)
+
+        with patch("classes.generation_service.File.get", return_value=file_obj) as file_get:
+            service.generate_from_scene_cast_for_clip(clip)
+
+        file_get.assert_called_once_with(id="F1")
+        self.assertEqual(triggered, [file_obj])
+
+    def test_generate_from_scene_cast_for_clip_warns_when_file_missing(self):
+        service = GenerationService.__new__(GenerationService)
+        service.win = types.SimpleNamespace()
+        clip = types.SimpleNamespace(data={"file_id": "missing"})
+        service.action_generate_trigger = lambda source_file=None: self.fail("should not delegate without a file")
+
+        with patch("classes.generation_service.File.get", return_value=None), \
+                patch("classes.generation_service.QMessageBox") as mock_box:
+            service.generate_from_scene_cast_for_clip(clip)
+
+        mock_box.warning.assert_called_once()
+
+    def test_generate_from_scene_cast_for_clip_warns_when_no_file_id(self):
+        service = GenerationService.__new__(GenerationService)
+        service.win = types.SimpleNamespace()
+        clip = types.SimpleNamespace(data={})
+        service.action_generate_trigger = lambda source_file=None: self.fail("should not delegate without a file_id")
+
+        with patch("classes.generation_service.QMessageBox") as mock_box:
+            service.generate_from_scene_cast_for_clip(clip)
+
+        mock_box.warning.assert_called_once()
 
 
 if __name__ == "__main__":

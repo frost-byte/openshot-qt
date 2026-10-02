@@ -65,6 +65,25 @@ class ParseExtraInputsTests(unittest.TestCase):
         self.assertNotIn("default", result[0])
         self.assertNotIn("default", result[1])
 
+    def test_group_and_group_label_are_passed_through(self):
+        payload = {
+            "extra_inputs": [
+                {"key": "composition_name", "type": "text", "group": "scene_cast", "group_label": "Scene Cast"},
+                {"key": "cast_entries_json", "type": "text", "group": "scene_cast", "default": "[]"},
+            ],
+        }
+        result = self.registry._parse_extra_inputs(payload, "t.json", needs_reference_image=False)
+        self.assertEqual(result[0]["group"], "scene_cast")
+        self.assertEqual(result[0]["group_label"], "Scene Cast")
+        self.assertEqual(result[1]["group"], "scene_cast")
+        self.assertNotIn("group_label", result[1])
+
+    def test_entries_without_group_omit_the_key_entirely(self):
+        payload = {"extra_inputs": [{"key": "a", "type": "text", "label": "A"}]}
+        result = self.registry._parse_extra_inputs(payload, "t.json", needs_reference_image=False)
+        self.assertNotIn("group", result[0])
+        self.assertNotIn("group_label", result[0])
+
     def test_non_text_entry_ignores_default(self):
         payload = {
             "extra_inputs": [
