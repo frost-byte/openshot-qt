@@ -321,6 +321,12 @@ class ComfyTemplateRegistry:
         open_dialog = None
         if isinstance(override_open_dialog, bool):
             open_dialog = override_open_dialog
+        # A "scene_cast" grouped extra_inputs entry (see _parse_extra_inputs) can only ever be
+        # filled in through GenerateMediaDialog's Scene Cast builder -- there is no sensible
+        # headless/quick-action value for it, so the dialog is mandatory regardless of what the
+        # template itself declares (or fails to declare) for open_dialog/needs_prompt.
+        if any(entry.get("group") == "scene_cast" for entry in extra_inputs):
+            open_dialog = True
 
         return {
             "id": unique_id,

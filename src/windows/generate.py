@@ -316,10 +316,10 @@ class GenerateMediaDialog(QDialog):
         row_layout.setContentsMargins(0, 0, 0, 0)
         self.scene_cast_summary_label = QLabel()
         self.scene_cast_summary_label.setWordWrap(True)
-        edit_button = QPushButton("Edit Cast...")
-        edit_button.clicked.connect(self._edit_scene_cast_clicked)
+        self.scene_cast_edit_button = QPushButton("Edit Cast...")
+        self.scene_cast_edit_button.clicked.connect(self._edit_scene_cast_clicked)
         row_layout.addWidget(self.scene_cast_summary_label, 1)
-        row_layout.addWidget(edit_button, 0)
+        row_layout.addWidget(self.scene_cast_edit_button, 0)
         label_text = entries[0].get("group_label") or "Scene Cast"
         self._extra_input_form.addRow(label_text, row)
         self._refresh_scene_cast_summary()
@@ -578,6 +578,18 @@ class GenerateMediaDialog(QDialog):
         missing = self._first_missing_required_input()
         if missing is not None:
             widget, entry = missing
+            if entry.get("group") == "scene_cast":
+                # These widgets are hidden (see _build_scene_cast_widgets) -- focusing one
+                # directly would show nothing, so point at the visible "Edit Cast..." button
+                # instead, which is where every scene_cast-grouped value actually comes from.
+                QMessageBox.warning(
+                    self, "Missing Input",
+                    "Use \"Edit Cast...\" to choose a Composition and assign the cast.",
+                )
+                self.tabs.setCurrentWidget(self.page_reference)
+                if hasattr(self, "scene_cast_edit_button"):
+                    self.scene_cast_edit_button.setFocus(Qt.TabFocusReason)
+                return
             if entry.get("type") in ("text", "choice"):
                 message = "Enter a value for \"{}\".".format(entry.get("label", entry["key"]))
             else:

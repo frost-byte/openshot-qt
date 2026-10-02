@@ -247,5 +247,51 @@ class LoadTemplateDefaultPromptTests(unittest.TestCase):
             self.assertEqual(result["default_prompt"], "")
 
 
+class LoadTemplateSceneCastOpenDialogTests(unittest.TestCase):
+    """A scene_cast-grouped extra_inputs entry can only ever be filled in through
+    GenerateMediaDialog's builder -- open_dialog must always come back True for such a
+    template, regardless of what (or whether) the template itself declares."""
+
+    def setUp(self):
+        self.registry = ComfyTemplateRegistry()
+
+    def _write_template(self, tmp_dir, payload):
+        path = os.path.join(tmp_dir, "t.json")
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(payload, fh)
+        return path
+
+    def test_scene_cast_template_forces_open_dialog_true_when_unset(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            path = self._write_template(tmp_dir, {
+                "name": "Test",
+                "extra_inputs": [{"key": "composition_name", "type": "text", "group": "scene_cast"}],
+                "workflow": {"1": {"class_type": "SaveVideo", "inputs": {}}},
+            })
+            result = self.registry._load_template(path, is_user=False, existing_ids=set())
+            self.assertIs(result["open_dialog"], True)
+
+    def test_scene_cast_template_forces_open_dialog_true_even_if_explicitly_false(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            path = self._write_template(tmp_dir, {
+                "name": "Test",
+                "open_dialog": False,
+                "extra_inputs": [{"key": "composition_name", "type": "text", "group": "scene_cast"}],
+                "workflow": {"1": {"class_type": "SaveVideo", "inputs": {}}},
+            })
+            result = self.registry._load_template(path, is_user=False, existing_ids=set())
+            self.assertIs(result["open_dialog"], True)
+
+    def test_non_scene_cast_template_open_dialog_unaffected(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            path = self._write_template(tmp_dir, {
+                "name": "Test",
+                "extra_inputs": [{"key": "some_text", "type": "text"}],
+                "workflow": {"1": {"class_type": "SaveVideo", "inputs": {}}},
+            })
+            result = self.registry._load_template(path, is_user=False, existing_ids=set())
+            self.assertIsNone(result["open_dialog"])
+
+
 if __name__ == "__main__":
     unittest.main()

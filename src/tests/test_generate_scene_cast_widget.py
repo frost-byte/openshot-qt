@@ -190,6 +190,31 @@ class SceneCastWidgetTests(unittest.TestCase):
         dlg = GenerateMediaDialog(templates=_scene_cast_template(), fbtools_client=client)
         self.assertIs(dlg.fbtools_client, client)
 
+    # ---- Generate-clicked validation UX ----
+
+    def test_generate_clicked_with_empty_composition_focuses_edit_button_not_hidden_widget(self):
+        dlg = GenerateMediaDialog(templates=_scene_cast_template())
+        dlg.name_edit.setText("my_generation")
+        with patch.object(generate_module, "QMessageBox") as mock_box, \
+                patch.object(dlg.scene_cast_edit_button, "setFocus") as mock_set_focus:
+            dlg._on_generate_clicked()
+        mock_box.warning.assert_called_once()
+        title, message = mock_box.warning.call_args[0][1], mock_box.warning.call_args[0][2]
+        self.assertEqual(title, "Missing Input")
+        self.assertIn("Edit Cast", message)
+        mock_set_focus.assert_called_once()
+
+    def test_generate_clicked_accepts_once_composition_and_cast_are_filled(self):
+        dlg = GenerateMediaDialog(templates=_scene_cast_template())
+        dlg.name_edit.setText("my_generation")
+        composition_widget, _ = dlg._extra_input_widgets["composition_name"]
+        cast_widget, _ = dlg._extra_input_widgets["cast_entries_json"]
+        composition_widget.setText("wide_shot")
+        cast_widget.setText(json.dumps([{"subject_id": "alex", "bundle_id": "alex_bundle"}]))
+        with patch.object(dlg, "accept") as mock_accept:
+            dlg._on_generate_clicked()
+        mock_accept.assert_called_once()
+
 
 if __name__ == "__main__":
     unittest.main()
