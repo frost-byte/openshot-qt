@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 import sys
 import unittest
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 SOURCE_ROOT = str(Path(__file__).resolve().parents[1])
 if SOURCE_ROOT not in sys.path:
@@ -115,6 +115,23 @@ class BuildOverridesJsonTests(unittest.TestCase):
         result = json.loads(scb.build_overrides_json("cafe_interior", False))
         self.assertEqual(result, {"background": "cafe_interior"})
         self.assertNotIn("background_as_reference", result)
+
+
+class FindClipTests(unittest.TestCase):
+    def test_returns_matching_clip(self):
+        profile = {"clips": [{"id": "clip_1", "action": "a"}, {"id": "clip_2", "action": "b"}]}
+        self.assertEqual(scb.find_clip(profile, "clip_2"), {"id": "clip_2", "action": "b"})
+
+    def test_returns_none_for_unknown_clip_id(self):
+        profile = {"clips": [{"id": "clip_1"}]}
+        self.assertIsNone(scb.find_clip(profile, "clip_9"))
+
+    def test_none_profile_returns_none(self):
+        self.assertIsNone(scb.find_clip(None, "clip_1"))
+
+    def test_empty_clip_id_returns_none(self):
+        profile = {"clips": [{"id": "clip_1"}]}
+        self.assertIsNone(scb.find_clip(profile, ""))
 
 
 class OrderedClipSubjectsTests(unittest.TestCase):
@@ -295,9 +312,21 @@ def _fake_source_profile_client(profiles=None, bundles=None, profile_by_id=None)
 
 
 class SceneCastBuilderDialogSourceProfileModeTests(unittest.TestCase):
+    """Clip selection also kicks off an async thumbnail fetch (a real QThread hitting
+    fbTools over HTTP) -- patched out here in every test via setUp/tearDown so these tests
+    never spin up a real background thread or network call. See
+    ClipPreviewTests below for dedicated coverage of that mechanism."""
+
     @classmethod
     def setUpClass(cls):
         cls.app, _ = get_or_create_app(lambda: QApplication([]))
+
+    def setUp(self):
+        self._fetch_patcher = patch.object(scb.SceneCastBuilderDialog, "_fetch_clip_thumbnail")
+        self._fetch_patcher.start()
+
+    def tearDown(self):
+        self._fetch_patcher.stop()
 
     def test_source_profile_combo_populated_from_client(self):
         client = _fake_source_profile_client(profiles=[{"id": "team_fort", "name": "Team Fort"}])
@@ -414,6 +443,102 @@ class SceneCastBuilderDialogSourceProfileModeTests(unittest.TestCase):
         dlg = scb.SceneCastBuilderDialog(fbtools_client=client, mode="source_profile")
         dlg.source_profile_combo.setCurrentIndex(dlg.source_profile_combo.findData("team_fort"))
         self.assertEqual(dlg._slot_widgets, {})
+
+
+class ClipPreviewTests(unittest.TestCase):
+    """Covers the clip-segment preview: synchronous action-text display, and the async
+    thumbnail fetch mechanism (_fetch_clip_thumbnail is mocked out here too, so no real
+    QThread/network call ever runs in tests -- _on_frame_fetched's own logic is exercised
+    directly instead, the same way the real worker's "finished" signal would invoke it)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app, _ = get_or_create_app(lambda: QApplication([]))
+
+    def _dialog_on_clip(self, clip, profile_id="team_fort"):
+        client = _fake_source_profile_client(
+            profiles=[{"id": profile_id, "name": "Team Fort"}],
+            profile_by_id={profile_id: {"id": profile_id, "subjects": [], "clips": [clip]}},
+        )
+        with patch.object(scb.SceneCastBuilderDialog, "_fetch_clip_thumbnail") as fetch_mock:
+            dlg = scb.SceneCastBuilderDialog(fbtools_client=client, mode="source_profile")
+            dlg.source_profile_combo.setCurrentIndex(dlg.source_profile_combo.findData(profile_id))
+            dlg.clip_combo.setCurrentIndex(dlg.clip_combo.findData(clip["id"]))
+        return dlg, fetch_mock
+
+    def test_action_text_shown_for_selected_clip(self):
+        dlg, _fetch_mock = self._dialog_on_clip({"id": "clip_1", "action": "Alex waves hello.", "start_time": 2.0})
+        self.assertEqual(dlg.clip_action_label.text(), "Alex waves hello.")
+
+    def test_missing_action_text_shows_placeholder(self):
+        dlg, _fetch_mock = self._dialog_on_clip({"id": "clip_1", "start_time": 0.0})
+        self.assertEqual(dlg.clip_action_label.text(), "(no action text)")
+
+    def test_thumbnail_fetch_requested_with_clip_start_time(self):
+        dlg, fetch_mock = self._dialog_on_clip({"id": "clip_1", "action": "x", "start_time": 4.5})
+        fetch_mock.assert_called_once()
+        profile_id, timestamp, request_id = fetch_mock.call_args[0]
+        self.assertEqual(profile_id, "team_fort")
+        self.assertEqual(timestamp, 4.5)
+        self.assertEqual(request_id, dlg._frame_request_id)
+
+    def test_no_client_skips_fetch_and_shows_no_preview(self):
+        dlg = scb.SceneCastBuilderDialog(fbtools_client=None, mode="source_profile")
+        dlg._update_clip_preview()
+        self.assertEqual(dlg.clip_thumbnail_label.text(), "No preview")
+
+    def test_on_frame_fetched_sets_pixmap_for_current_request(self):
+        dlg, _fetch_mock = self._dialog_on_clip({"id": "clip_1", "action": "x", "start_time": 0.0})
+        # A real JPEG is overkill here -- loadFromData() failing on bogus bytes is exactly
+        # the "No preview" fallback path, covered separately below. Use a real 1x1 pixmap's
+        # own PNG bytes instead, which QPixmap can decode regardless of the JPEG-ness fbTools
+        # actually sends in production (loadFromData() auto-detects format).
+        from qt_api import QPixmap, QBuffer
+        px = QPixmap(1, 1)
+        buf = QBuffer()
+        buf.open(QBuffer.ReadWrite)
+        px.save(buf, "PNG")
+        data = bytes(buf.data())
+        dlg._on_frame_fetched(dlg._frame_request_id, data)
+        self.assertFalse(dlg.clip_thumbnail_label.pixmap().isNull())
+
+    def test_on_frame_fetched_ignores_stale_request_id(self):
+        dlg, _fetch_mock = self._dialog_on_clip({"id": "clip_1", "action": "x", "start_time": 0.0})
+        dlg.clip_thumbnail_label.setText("Loading...")
+        stale_id = dlg._frame_request_id - 1
+        dlg._on_frame_fetched(stale_id, b"whatever")
+        self.assertEqual(dlg.clip_thumbnail_label.text(), "Loading...")
+
+    def test_on_frame_fetched_none_data_shows_no_preview(self):
+        dlg, _fetch_mock = self._dialog_on_clip({"id": "clip_1", "action": "x", "start_time": 0.0})
+        dlg._on_frame_fetched(dlg._frame_request_id, None)
+        self.assertEqual(dlg.clip_thumbnail_label.text(), "No preview")
+
+    def test_on_frame_fetched_undecodable_bytes_shows_no_preview(self):
+        dlg, _fetch_mock = self._dialog_on_clip({"id": "clip_1", "action": "x", "start_time": 0.0})
+        dlg._on_frame_fetched(dlg._frame_request_id, b"not an image")
+        self.assertEqual(dlg.clip_thumbnail_label.text(), "No preview")
+
+    def test_switching_clips_invalidates_previous_request(self):
+        client = _fake_source_profile_client(
+            profiles=[{"id": "team_fort", "name": "Team Fort"}],
+            profile_by_id={"team_fort": {"id": "team_fort", "subjects": [], "clips": [
+                {"id": "clip_1", "action": "a", "start_time": 0.0},
+                {"id": "clip_2", "action": "b", "start_time": 1.0},
+            ]}},
+        )
+        with patch.object(scb.SceneCastBuilderDialog, "_fetch_clip_thumbnail"):
+            dlg = scb.SceneCastBuilderDialog(fbtools_client=client, mode="source_profile")
+            dlg.source_profile_combo.setCurrentIndex(dlg.source_profile_combo.findData("team_fort"))
+            dlg.clip_combo.setCurrentIndex(dlg.clip_combo.findData("clip_1"))
+            first_request_id = dlg._frame_request_id
+            dlg.clip_combo.setCurrentIndex(dlg.clip_combo.findData("clip_2"))
+            second_request_id = dlg._frame_request_id
+        self.assertNotEqual(first_request_id, second_request_id)
+        # The first request's result must now be dropped as stale.
+        dlg.clip_thumbnail_label.setText("Loading...")
+        dlg._on_frame_fetched(first_request_id, b"whatever")
+        self.assertEqual(dlg.clip_thumbnail_label.text(), "Loading...")
 
 
 if __name__ == "__main__":

@@ -31,10 +31,40 @@ import json
 
 from qt_api import (
     Qt, QDialog, QVBoxLayout, QHBoxLayout, QFormLayout, QLabel, QComboBox,
-    QPushButton, QCheckBox, QRadioButton, QButtonGroup, QWidget,
+    QPushButton, QCheckBox, QRadioButton, QButtonGroup, QWidget, QPixmap,
+    QObject, QThread, pyqtSignal,
 )
 
 from classes.logger import log
+
+_THUMBNAIL_WIDTH = 160
+_THUMBNAIL_HEIGHT = 90
+
+
+class _ClipFrameFetchWorker(QObject):
+    """Fetches one clip-segment thumbnail frame off the UI thread. Disposable: a new worker
+    (and thread) is spun up per fetch rather than reused, since these happen at most once per
+    Clip Segment selection -- not a hot path worth pooling."""
+
+    finished = pyqtSignal(int, object)  # request_id, raw JPEG bytes (or None on failure)
+
+    def __init__(self, fbtools_client, profile_id, timestamp, request_id):
+        super().__init__()
+        self._fbtools_client = fbtools_client
+        self._profile_id = profile_id
+        self._timestamp = timestamp
+        self._request_id = request_id
+
+    def run(self):
+        try:
+            data = self._fbtools_client.get_source_profile_frame(
+                self._profile_id, self._timestamp, width=_THUMBNAIL_WIDTH,
+            )
+        except Exception as ex:
+            log.debug("SceneCastBuilderDialog: clip thumbnail fetch failed: %s", ex)
+            data = None
+        self.finished.emit(self._request_id, data)
+
 
 # Sentinel QComboBox userData for "leave this slot/background exactly as the Composition
 # itself defines it" -- distinct from "" (bundle combo's own "no bundle chosen" state) and from
@@ -102,18 +132,25 @@ def build_cast_entries_json(slot_assignments):
     return json.dumps(entries)
 
 
+def find_clip(profile, clip_id):
+    """Return the clip dict matching `clip_id` within `profile` (a source profile dict from
+    FBToolsClient.get_source_profile), or None. Shared by the thumbnail-fetch and action-text
+    display, both of which need the same clip lookup ordered_clip_subjects() does internally."""
+    if not isinstance(profile, dict) or not clip_id:
+        return None
+    return next(
+        (c for c in profile.get("clips", []) if isinstance(c, dict) and c.get("id") == clip_id),
+        None,
+    )
+
+
 def ordered_clip_subjects(profile, clip_id):
     """Return [(source_subject_id, label), ...] for the subjects actually present in
     `clip_id` within `profile` (a source profile dict from FBToolsClient.get_source_profile),
     in the clip's own list order. A clip's own `subjects` field is just a list of ids (see
     utils/source_profiles.py::_normalize_clip) -- labels come from cross-referencing the
     profile's own subject roster; falls back to the bare id if a subject entry is missing."""
-    if not isinstance(profile, dict) or not clip_id:
-        return []
-    clip = next(
-        (c for c in profile.get("clips", []) if isinstance(c, dict) and c.get("id") == clip_id),
-        None,
-    )
+    clip = find_clip(profile, clip_id)
     if not clip:
         return []
     labels_by_id = {
@@ -210,6 +247,8 @@ class SceneCastBuilderDialog(QDialog):
         self._slot_widgets = {}  # key -> {..., "bundle_combo", "primary_radio"}
         self._primary_group = QButtonGroup(self)
         self._primary_group.setExclusive(True)
+        self._frame_request_id = 0
+        self._frame_thread = None
 
         self.setObjectName("sceneCastBuilderDialog")
         self.setWindowTitle("Edit Scene Cast")
@@ -269,6 +308,21 @@ class SceneCastBuilderDialog(QDialog):
         self.clip_combo.currentIndexChanged.connect(self._on_clip_changed)
         top_form.addRow("Source Profile", self.source_profile_combo)
         top_form.addRow("Clip Segment", self.clip_combo)
+
+        preview_row = QWidget(self)
+        preview_layout = QHBoxLayout(preview_row)
+        preview_layout.setContentsMargins(0, 0, 0, 0)
+        self.clip_thumbnail_label = QLabel()
+        self.clip_thumbnail_label.setFixedSize(_THUMBNAIL_WIDTH, _THUMBNAIL_HEIGHT)
+        self.clip_thumbnail_label.setAlignment(Qt.AlignCenter)
+        self.clip_thumbnail_label.setStyleSheet("border: 1px solid palette(mid);")
+        self.clip_action_label = QLabel()
+        self.clip_action_label.setWordWrap(True)
+        self.clip_action_label.setAlignment(Qt.AlignTop | Qt.AlignLeft)
+        preview_layout.addWidget(self.clip_thumbnail_label, 0)
+        preview_layout.addWidget(self.clip_action_label, 1)
+        top_form.addRow("Preview", preview_row)
+
         return top_form
 
     def _build_background_form(self):
@@ -456,7 +510,60 @@ class SceneCastBuilderDialog(QDialog):
 
     def _on_clip_changed(self, index):
         _ = index
+        self._update_clip_preview()
         self._rebuild_slot_rows()
+
+    def _update_clip_preview(self):
+        """Refresh the action-text label synchronously (already loaded, no I/O) and kick off
+        an async thumbnail fetch for the newly-selected clip's first frame."""
+        clip_id = str(self.clip_combo.currentData() or "").strip()
+        clip = find_clip(self._loaded_source_profile, clip_id)
+
+        self.clip_action_label.setText(str((clip or {}).get("action", "")).strip() or "(no action text)")
+
+        # Invalidate any in-flight fetch for a previously-selected clip before starting a new
+        # one -- _on_frame_fetched() drops results whose request_id no longer matches this.
+        self._frame_request_id += 1
+        if not clip or self.fbtools_client is None:
+            self.clip_thumbnail_label.clear()
+            self.clip_thumbnail_label.setText("No preview")
+            return
+
+        profile_id = str(self.source_profile_combo.currentData() or "").strip()
+        start_time = float(clip.get("start_time", 0.0))
+        self.clip_thumbnail_label.clear()
+        self.clip_thumbnail_label.setText("Loading...")
+        self._fetch_clip_thumbnail(profile_id, start_time, self._frame_request_id)
+
+    def _fetch_clip_thumbnail(self, profile_id, timestamp, request_id):
+        thread = QThread(self)
+        worker = _ClipFrameFetchWorker(self.fbtools_client, profile_id, timestamp, request_id)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.finished.connect(self._on_frame_fetched)
+        worker.finished.connect(thread.quit)
+        worker.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        # Keep a reference so the thread isn't garbage-collected mid-flight; a later call
+        # simply replaces it once its own finished/deleteLater chain has run.
+        self._frame_thread = thread
+        thread.start()
+
+    def _on_frame_fetched(self, request_id, data):
+        if request_id != self._frame_request_id:
+            return  # superseded by a later Clip Segment selection -- drop this stale result
+        if not data:
+            self.clip_thumbnail_label.setText("No preview")
+            return
+        pixmap = QPixmap()
+        if pixmap.loadFromData(data):
+            self.clip_thumbnail_label.setPixmap(
+                pixmap.scaled(
+                    _THUMBNAIL_WIDTH, _THUMBNAIL_HEIGHT, Qt.KeepAspectRatio, Qt.SmoothTransformation,
+                )
+            )
+        else:
+            self.clip_thumbnail_label.setText("No preview")
 
     def _rebuild_source_profile_slot_rows(self):
         clip_id = str(self.clip_combo.currentData() or "").strip()

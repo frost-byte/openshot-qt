@@ -74,6 +74,19 @@ class FBToolsClient:
             log.warning("FBToolsClient POST %s failed: %s", path, ex)
             raise RuntimeError("fbTools request failed: {}".format(ex))
 
+    def _get_bytes(self, path, params=None, timeout=15.0):
+        """Like _get(), but for an endpoint that returns a raw binary body (a JPEG frame, say)
+        instead of JSON."""
+        url = "{}{}".format(self.base_url, path)
+        if params:
+            url = "{}?{}".format(url, urlencode(params))
+        try:
+            with urlopen(url, timeout=timeout) as response:
+                return response.read()
+        except Exception as ex:
+            log.warning("FBToolsClient GET (bytes) %s failed: %s", path, ex)
+            raise RuntimeError("fbTools request failed: {}".format(ex))
+
     def list_compositions(self):
         """Return the list of composition summaries (`{id, name, model_type, ...}`)."""
         data = self._get("/fbtools/compositions/list")
@@ -110,6 +123,16 @@ class FBToolsClient:
         (each with a scoped `subjects` list -- who's actually in that segment) and the
         profile-wide `subjects` roster."""
         return self._get("/fbtools/source_profiles/get", {"id": profile_id})
+
+    def get_source_profile_frame(self, profile_id, timestamp, width=160):
+        """Return raw JPEG bytes for the frame at `timestamp` seconds into `profile_id`'s
+        media file (the same endpoint fbTools' own clip editor uses for start/end boundary
+        thumbnails) -- not JSON, so callers load it straight into a QPixmap."""
+        return self._get_bytes("/fbtools/source_profiles/frame_at", {
+            "profile_id": profile_id,
+            "t": timestamp,
+            "w": width,
+        })
 
     def inspect_cast_metadata(self, prompt_graph=None, cast_summary=None):
         """POST a clip's locally-read embedded metadata and get back the resolved

@@ -25,6 +25,14 @@ def _fake_response(payload):
     return response
 
 
+def _fake_bytes_response(data):
+    response = MagicMock()
+    response.read.return_value = data
+    response.__enter__ = MagicMock(return_value=response)
+    response.__exit__ = MagicMock(return_value=False)
+    return response
+
+
 class FBToolsClientTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -94,6 +102,24 @@ class FBToolsClientTests(unittest.TestCase):
         self.assertEqual(result, {"id": "team_fort", "clips": [{"id": "clip_3", "subjects": ["s1"]}]})
         requested_url = urlopen.call_args[0][0]
         self.assertEqual(requested_url, "http://127.0.0.1:8188/fbtools/source_profiles/get?id=team_fort")
+
+    def test_get_source_profile_frame_passes_query_params_and_returns_raw_bytes(self):
+        client = self._client()
+        jpeg_bytes = b"\xff\xd8\xff\xe0fakejpegdata"
+        with patch.object(self.module, "urlopen", return_value=_fake_bytes_response(jpeg_bytes)) as urlopen:
+            result = client.get_source_profile_frame("team_fort", 1.5, width=160)
+        self.assertEqual(result, jpeg_bytes)
+        requested_url = urlopen.call_args[0][0]
+        self.assertEqual(
+            requested_url,
+            "http://127.0.0.1:8188/fbtools/source_profiles/frame_at?profile_id=team_fort&t=1.5&w=160",
+        )
+
+    def test_get_source_profile_frame_raises_runtime_error_on_failure(self):
+        client = self._client()
+        with patch.object(self.module, "urlopen", side_effect=OSError("connection refused")):
+            with self.assertRaises(RuntimeError):
+                client.get_source_profile_frame("team_fort", 1.5)
 
     def test_get_raises_runtime_error_on_failure(self):
         client = self._client()
