@@ -1,6 +1,7 @@
 import copy
 import os
 import sys
+import tempfile
 import types
 import unittest
 from unittest.mock import MagicMock, patch
@@ -17,7 +18,21 @@ generate_module.GenerateMediaDialog = type("GenerateMediaDialog", (), {})
 sys.modules.setdefault("windows.generate", generate_module)
 
 from qt_api import QDialog
+from classes import info
 from classes.generation_service import GenerationService
+
+# bridge_clips_with_ai renders into a fixed, deterministic-prefix path under
+# info.COMFYUI_OUTPUT_PATH (a persistent, user-data-owned directory -- not the OS temp dir,
+# which can be cleared on reboot and silently orphan the Project Files entries it creates).
+# Tests patch uuid.uuid4() to this fixed value so the resulting paths are predictable.
+_BRIDGE_UUID_HEX = "deadbeef0000111122223333444455556666"
+_BRIDGE_DIR = os.path.join(info.COMFYUI_OUTPUT_PATH, "bridge_clips")
+_BRIDGE_PATH_A = os.path.join(_BRIDGE_DIR, "deadbeef_clip_a.mp4")
+_BRIDGE_PATH_B = os.path.join(_BRIDGE_DIR, "deadbeef_clip_b.mp4")
+
+
+def _patch_bridge_uuid():
+    return patch("classes.generation_service.uuid.uuid4", return_value=types.SimpleNamespace(hex=_BRIDGE_UUID_HEX))
 
 
 class _StatusBarRecorder:
@@ -709,7 +724,8 @@ class GenerationServiceTests(unittest.TestCase):
         service.templates_for_context = lambda source_file=None: [bridge_template]
 
         with patch("classes.generation_service.render_clip_to_file", return_value=False), \
-             patch("classes.generation_service.tempfile.mkdtemp", return_value="/tmp/bridge"), \
+             _patch_bridge_uuid(), \
+             patch("classes.generation_service.os.makedirs"), \
              patch("classes.generation_service.QMessageBox") as mock_box:
             service.bridge_clips_with_ai(
                 types.SimpleNamespace(data={}), types.SimpleNamespace(data={}),
@@ -725,7 +741,8 @@ class GenerationServiceTests(unittest.TestCase):
         service.templates_for_context = lambda source_file=None: [bridge_template]
 
         with patch("classes.generation_service.render_clip_to_file", return_value=True), \
-             patch("classes.generation_service.tempfile.mkdtemp", return_value="/tmp/bridge"), \
+             _patch_bridge_uuid(), \
+             patch("classes.generation_service.os.makedirs"), \
              patch("classes.generation_service.File.get", return_value=None), \
              patch("classes.generation_service.QMessageBox") as mock_box:
             service.bridge_clips_with_ai(
@@ -743,8 +760,8 @@ class GenerationServiceTests(unittest.TestCase):
         service._default_generation_name = lambda file_obj: "bridge_gen1"
         service.comfy_ui_url = lambda: "http://localhost:8188"
 
-        file_a = types.SimpleNamespace(id="FA", data={"path": "/tmp/bridge/clip_a.mp4"})
-        file_b = types.SimpleNamespace(id="FB", data={"path": "/tmp/bridge/clip_b.mp4"})
+        file_a = types.SimpleNamespace(id="FA", data={"path": _BRIDGE_PATH_A})
+        file_b = types.SimpleNamespace(id="FB", data={"path": _BRIDGE_PATH_B})
         files_by_path = {file_a.data["path"]: file_a, file_b.data["path"]: file_b}
 
         dialog_instance = MagicMock()
@@ -761,7 +778,8 @@ class GenerationServiceTests(unittest.TestCase):
         clip_b = types.SimpleNamespace(data={"position": 5.0, "layer": 1})
 
         with patch("classes.generation_service.render_clip_to_file", return_value=True), \
-             patch("classes.generation_service.tempfile.mkdtemp", return_value="/tmp/bridge"), \
+             _patch_bridge_uuid(), \
+             patch("classes.generation_service.os.makedirs"), \
              patch("classes.generation_service.File.get", side_effect=lambda path: files_by_path.get(path)), \
              patch("classes.generation_service.GenerateMediaDialog", dialog_cls), \
              patch.object(service, "_preselect_bridge_second_video_input") as preselect_mock:
@@ -792,8 +810,8 @@ class GenerationServiceTests(unittest.TestCase):
         service._default_generation_name = lambda file_obj: "bridge_gen1"
         service.comfy_ui_url = lambda: "http://localhost:8188"
 
-        file_a = types.SimpleNamespace(id="FA", data={"path": "/tmp/bridge/clip_a.mp4"})
-        file_b = types.SimpleNamespace(id="FB", data={"path": "/tmp/bridge/clip_b.mp4"})
+        file_a = types.SimpleNamespace(id="FA", data={"path": _BRIDGE_PATH_A})
+        file_b = types.SimpleNamespace(id="FB", data={"path": _BRIDGE_PATH_B})
         files_by_path = {file_a.data["path"]: file_a, file_b.data["path"]: file_b}
 
         dialog_instance = MagicMock()
@@ -806,13 +824,47 @@ class GenerationServiceTests(unittest.TestCase):
         clip_b = types.SimpleNamespace(data={"position": 5.0, "layer": 1})
 
         with patch("classes.generation_service.render_clip_to_file", return_value=True), \
-             patch("classes.generation_service.tempfile.mkdtemp", return_value="/tmp/bridge"), \
+             _patch_bridge_uuid(), \
+             patch("classes.generation_service.os.makedirs"), \
              patch("classes.generation_service.File.get", side_effect=lambda path: files_by_path.get(path)), \
              patch("classes.generation_service.GenerateMediaDialog", dialog_cls), \
              patch.object(service, "_preselect_bridge_second_video_input"):
             service.bridge_clips_with_ai(clip_a, clip_b)
 
         dialog_instance.get_payload.assert_not_called()
+
+    def test_bridge_clips_with_ai_renders_under_persistent_output_dir_not_system_temp(self):
+        # Regression test: these renders are imported into Project Files as permanent
+        # references just below -- rendering into the OS temp dir (the original
+        # implementation used tempfile.mkdtemp()) orphans them the moment something clears
+        # /tmp (observed in practice after a reboot).
+        service = GenerationService.__new__(GenerationService)
+        service.win = types.SimpleNamespace(
+            files_model=types.SimpleNamespace(add_files=lambda *a, **k: None),
+        )
+        bridge_template = {"id": "video-bridge", "template": {"extra_inputs": [{"key": "clip_b", "type": "video"}]}}
+        service.templates_for_context = lambda source_file=None: [bridge_template]
+
+        render_calls = []
+
+        def fake_render(clip, path):
+            render_calls.append(path)
+            return False  # short-circuit after capturing the paths; rest of the flow is covered elsewhere
+
+        clip_a = types.SimpleNamespace(data={})
+        clip_b = types.SimpleNamespace(data={})
+
+        with patch("classes.generation_service.render_clip_to_file", side_effect=fake_render), \
+             patch("classes.generation_service.os.makedirs") as makedirs_mock, \
+             patch("classes.generation_service.QMessageBox"):
+            service.bridge_clips_with_ai(clip_a, clip_b)
+
+        self.assertEqual(len(render_calls), 1)  # render_clip_to_file for clip_a is called first
+        rendered_path = render_calls[0]
+        self.assertTrue(rendered_path.startswith(info.COMFYUI_OUTPUT_PATH))
+        self.assertNotIn(tempfile.gettempdir(), rendered_path)
+        makedirs_mock.assert_called_once()
+        self.assertTrue(makedirs_mock.call_args[0][0].startswith(info.COMFYUI_OUTPUT_PATH))
 
     def test_bridge_clips_with_ai_template_combo_change_rewires_preselect(self):
         service = GenerationService.__new__(GenerationService)
@@ -824,8 +876,8 @@ class GenerationServiceTests(unittest.TestCase):
         service._default_generation_name = lambda file_obj: "bridge_gen1"
         service.comfy_ui_url = lambda: "http://localhost:8188"
 
-        file_a = types.SimpleNamespace(id="FA", data={"path": "/tmp/bridge/clip_a.mp4"})
-        file_b = types.SimpleNamespace(id="FB", data={"path": "/tmp/bridge/clip_b.mp4"})
+        file_a = types.SimpleNamespace(id="FA", data={"path": _BRIDGE_PATH_A})
+        file_b = types.SimpleNamespace(id="FB", data={"path": _BRIDGE_PATH_B})
         files_by_path = {file_a.data["path"]: file_a, file_b.data["path"]: file_b}
 
         dialog_instance = MagicMock()
@@ -837,7 +889,8 @@ class GenerationServiceTests(unittest.TestCase):
         clip_b = types.SimpleNamespace(data={"position": 5.0, "layer": 1})
 
         with patch("classes.generation_service.render_clip_to_file", return_value=True), \
-             patch("classes.generation_service.tempfile.mkdtemp", return_value="/tmp/bridge"), \
+             _patch_bridge_uuid(), \
+             patch("classes.generation_service.os.makedirs"), \
              patch("classes.generation_service.File.get", side_effect=lambda path: files_by_path.get(path)), \
              patch("classes.generation_service.GenerateMediaDialog", dialog_cls):
             service.bridge_clips_with_ai(clip_a, clip_b)

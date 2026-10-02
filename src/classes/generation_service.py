@@ -1368,9 +1368,16 @@ class GenerationService(QObject):
             )
             return
 
-        temp_dir = tempfile.mkdtemp(prefix="openshot_bridge_")
-        path_a = os.path.join(temp_dir, "clip_a.mp4")
-        path_b = os.path.join(temp_dir, "clip_b.mp4")
+        # Render into a persistent folder, not the OS temp dir: these renders are imported into
+        # Project Files just below as ordinary, permanent references, and a system temp
+        # directory can be (and, in practice, was) cleared on reboot -- silently orphaning those
+        # Project Files entries. info.COMFYUI_OUTPUT_PATH is the same stable, user-data-owned
+        # directory real generation outputs already download into.
+        bridge_dir = os.path.join(info.COMFYUI_OUTPUT_PATH, "bridge_clips")
+        os.makedirs(bridge_dir, exist_ok=True)
+        unique_prefix = uuid.uuid4().hex[:8]
+        path_a = os.path.join(bridge_dir, "{}_clip_a.mp4".format(unique_prefix))
+        path_b = os.path.join(bridge_dir, "{}_clip_b.mp4".format(unique_prefix))
         if not render_clip_to_file(clip_a, path_a) or not render_clip_to_file(clip_b, path_b):
             QMessageBox.warning(
                 self.win, "Bridge Clips Failed",
