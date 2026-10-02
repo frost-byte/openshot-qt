@@ -900,6 +900,26 @@ class GenerationServiceTests(unittest.TestCase):
         # Clip B in rather than leaving it to the user to notice and redo.
         dialog_instance.template_combo.currentIndexChanged.connect.assert_called_once()
 
+    # ---- build_menu_templates scene_cast contextual bucketing ----
+
+    def test_build_menu_templates_buckets_scene_cast_by_context_not_static_category(self):
+        scene_cast_template = {"id": "video-scene-cast-generate", "category": "enhance"}
+        plain_create_template = {"id": "txt2img", "category": "create"}
+        service = GenerationService.__new__(GenerationService)
+        service.template_registry = types.SimpleNamespace(
+            templates_for_context=lambda source_file=None: [scene_cast_template, plain_create_template],
+            has_scene_cast_group=lambda t: t.get("id") == "video-scene-cast-generate",
+        )
+
+        grouped_no_file = service.build_menu_templates(source_file=None)
+        self.assertIn(scene_cast_template, grouped_no_file["create"])
+        self.assertNotIn(scene_cast_template, grouped_no_file["enhance"])
+        self.assertIn(plain_create_template, grouped_no_file["create"])
+
+        grouped_with_file = service.build_menu_templates(source_file=types.SimpleNamespace(data={}))
+        self.assertIn(scene_cast_template, grouped_with_file["enhance"])
+        self.assertNotIn(scene_cast_template, grouped_with_file["create"])
+
     # ---- fbtools_client / Scene Cast pre-fill wiring ----
 
     def test_fbtools_client_uses_comfy_ui_url(self):

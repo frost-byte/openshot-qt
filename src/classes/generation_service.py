@@ -546,7 +546,16 @@ class GenerationService(QObject):
 
     def build_menu_templates(self, source_file=None):
         grouped = {"create": [], "enhance": [], "unknown": []}
+        contextual_category = "enhance" if source_file else "create"
         for template in self.template_registry.templates_for_context(source_file=source_file):
+            if self.template_registry.has_scene_cast_group(template):
+                # Bucket by calling context, not the template's own stored category --
+                # templates_for_context() already makes a scene_cast-grouped template
+                # eligible in both contexts, so it must land in whichever menu
+                # ("Create with AI" / "Enhance with AI") actually gets shown for this
+                # context, not silently disappear because its static category differs.
+                grouped[contextual_category].append(template)
+                continue
             category = str(template.get("category", "unknown"))
             if category not in grouped:
                 category = "unknown"

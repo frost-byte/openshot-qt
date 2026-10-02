@@ -6,6 +6,7 @@ import json
 import os
 import sys
 import tempfile
+import types
 import unittest
 from unittest.mock import patch
 
@@ -291,6 +292,61 @@ class LoadTemplateSceneCastOpenDialogTests(unittest.TestCase):
             })
             result = self.registry._load_template(path, is_user=False, existing_ids=set())
             self.assertIsNone(result["open_dialog"])
+
+
+class HasSceneCastGroupTests(unittest.TestCase):
+    def test_true_when_any_entry_has_scene_cast_group(self):
+        template = {"extra_inputs": [
+            {"key": "a", "type": "text"},
+            {"key": "composition_name", "type": "text", "group": "scene_cast"},
+        ]}
+        self.assertTrue(ComfyTemplateRegistry.has_scene_cast_group(template))
+
+    def test_false_when_no_entries_have_the_group(self):
+        template = {"extra_inputs": [{"key": "a", "type": "text"}]}
+        self.assertFalse(ComfyTemplateRegistry.has_scene_cast_group(template))
+
+    def test_false_when_no_extra_inputs_key(self):
+        self.assertFalse(ComfyTemplateRegistry.has_scene_cast_group({}))
+
+
+class TemplatesForContextSceneCastExemptionTests(unittest.TestCase):
+    """A scene_cast-grouped template is eligible for "Create with AI" (no file selected)
+    AND "Enhance with AI" (a file selected) regardless of its own stored "category" --
+    only the selected file is used, never as a real template input, so there is no reason
+    a from-scratch Composition generation should require a file to be selected first."""
+
+    def setUp(self):
+        self.registry = ComfyTemplateRegistry()
+        self.scene_cast_template = {
+            "id": "video-scene-cast-generate",
+            "category": "enhance",
+            "input_types": [],
+            "extra_inputs": [{"key": "composition_name", "type": "text", "group": "scene_cast"}],
+        }
+        self.plain_enhance_template = {"id": "video2video", "category": "enhance", "input_types": ["video"]}
+        self.plain_create_template = {"id": "txt2img", "category": "create", "input_types": []}
+
+    def test_scene_cast_template_included_with_no_source_file(self):
+        with patch.object(self.registry, "discover", return_value=[
+            self.scene_cast_template, self.plain_enhance_template, self.plain_create_template,
+        ]):
+            result = self.registry.templates_for_context(source_file=None)
+        ids = {t["id"] for t in result}
+        self.assertIn("video-scene-cast-generate", ids)
+        self.assertIn("txt2img", ids)
+        self.assertNotIn("video2video", ids)
+
+    def test_scene_cast_template_included_with_source_file(self):
+        source_file = types.SimpleNamespace(data={"media_type": "audio"})
+        with patch.object(self.registry, "discover", return_value=[
+            self.scene_cast_template, self.plain_enhance_template, self.plain_create_template,
+        ]):
+            result = self.registry.templates_for_context(source_file=source_file)
+        ids = {t["id"] for t in result}
+        self.assertIn("video-scene-cast-generate", ids)
+        self.assertNotIn("video2video", ids)  # media_type mismatch (video vs audio)
+        self.assertNotIn("txt2img", ids)
 
 
 if __name__ == "__main__":

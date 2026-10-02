@@ -513,6 +513,15 @@ class ComfyTemplateRegistry:
 
         filtered = []
         for template in templates:
+            if self.has_scene_cast_group(template):
+                # A scene_cast-grouped template (Composition pick + cast assignment via
+                # GenerateMediaDialog's builder) makes sense whether or not a file is
+                # selected -- the selected file, when present, is only ever used for the
+                # builder's best-effort metadata pre-fill, never as a real template input.
+                # Exempt it from the create/enhance split entirely rather than picking one
+                # category and losing visibility in the other context.
+                filtered.append(template)
+                continue
             category = str(template.get("category", "unknown"))
             input_types = set(template.get("input_types", []))
             if source_file:
@@ -527,6 +536,16 @@ class ComfyTemplateRegistry:
                     continue
             filtered.append(template)
         return filtered
+
+    @staticmethod
+    def has_scene_cast_group(template):
+        """True if any of `template`'s extra_inputs entries declare `"group": "scene_cast"`
+        (see comfy_templates.py::_parse_extra_inputs and GenerateMediaDialog's grouped Scene
+        Cast widget). Shared by templates_for_context() above and
+        GenerationService.build_menu_templates(), which both need to treat such a template as
+        eligible regardless of file-selection context."""
+        extra_inputs = template.get("extra_inputs", [])
+        return any(isinstance(entry, dict) and entry.get("group") == "scene_cast" for entry in extra_inputs)
 
     def get_template(self, template_id):
         template_id = str(template_id or "").strip()
