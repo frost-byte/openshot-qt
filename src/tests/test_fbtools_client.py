@@ -79,6 +79,22 @@ class FBToolsClientTests(unittest.TestCase):
             result = client.list_backgrounds()
         self.assertEqual(result, [{"id": "bg1"}])
 
+    def test_list_source_profiles_accepts_wrapped_response(self):
+        client = self._client()
+        with patch.object(self.module, "urlopen", return_value=_fake_response(
+                {"profiles": [{"id": "team_fort", "name": "Team Fort"}]})):
+            result = client.list_source_profiles()
+        self.assertEqual(result, [{"id": "team_fort", "name": "Team Fort"}])
+
+    def test_get_source_profile_passes_id_as_query_param(self):
+        client = self._client()
+        with patch.object(self.module, "urlopen", return_value=_fake_response(
+                {"id": "team_fort", "clips": [{"id": "clip_3", "subjects": ["s1"]}]})) as urlopen:
+            result = client.get_source_profile("team_fort")
+        self.assertEqual(result, {"id": "team_fort", "clips": [{"id": "clip_3", "subjects": ["s1"]}]})
+        requested_url = urlopen.call_args[0][0]
+        self.assertEqual(requested_url, "http://127.0.0.1:8188/fbtools/source_profiles/get?id=team_fort")
+
     def test_get_raises_runtime_error_on_failure(self):
         client = self._client()
         with patch.object(self.module, "urlopen", side_effect=OSError("connection refused")):

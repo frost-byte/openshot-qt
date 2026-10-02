@@ -52,6 +52,8 @@ _SCENE_CAST_KEY_DEFAULTS = {
     "composition_name": "",
     "cast_entries_json": "[]",
     "composition_overrides_json": "{}",
+    "source_profile_id": "",
+    "clip_id": "",
 }
 
 
@@ -325,34 +327,64 @@ class GenerateMediaDialog(QDialog):
         self._refresh_scene_cast_summary()
         self._maybe_prefill_scene_cast()
 
-    def _edit_scene_cast_clicked(self):
-        composition_widget = self._scene_cast_entries.get("composition_name")
-        cast_widget = self._scene_cast_entries.get("cast_entries_json")
-        overrides_widget = self._scene_cast_entries.get("composition_overrides_json")
+    def _scene_cast_mode(self):
+        """Which SceneCastBuilderDialog mode this template's grouped entries declare --
+        determined purely by which keys are present, so generate.py never needs a separate
+        "mode" flag of its own to stay in sync with."""
+        if "source_profile_id" in self._scene_cast_entries:
+            return "source_profile"
+        return "composition"
 
-        dlg = SceneCastBuilderDialog(
-            fbtools_client=self.fbtools_client,
-            composition_name=composition_widget.text() if composition_widget else "",
-            cast_entries_json=cast_widget.text() if cast_widget else "[]",
-            composition_overrides_json=overrides_widget.text() if overrides_widget else "{}",
-            parent=self,
-        )
+    def _edit_scene_cast_clicked(self):
+        mode = self._scene_cast_mode()
+        cast_widget = self._scene_cast_entries.get("cast_entries_json")
+
+        if mode == "source_profile":
+            profile_widget = self._scene_cast_entries.get("source_profile_id")
+            clip_widget = self._scene_cast_entries.get("clip_id")
+            dlg = SceneCastBuilderDialog(
+                fbtools_client=self.fbtools_client,
+                mode="source_profile",
+                source_profile_id=profile_widget.text() if profile_widget else "",
+                clip_id=clip_widget.text() if clip_widget else "",
+                cast_entries_json=cast_widget.text() if cast_widget else "[]",
+                parent=self,
+            )
+        else:
+            profile_widget = clip_widget = None
+            composition_widget = self._scene_cast_entries.get("composition_name")
+            overrides_widget = self._scene_cast_entries.get("composition_overrides_json")
+            dlg = SceneCastBuilderDialog(
+                fbtools_client=self.fbtools_client,
+                mode="composition",
+                composition_name=composition_widget.text() if composition_widget else "",
+                cast_entries_json=cast_widget.text() if cast_widget else "[]",
+                composition_overrides_json=overrides_widget.text() if overrides_widget else "{}",
+                parent=self,
+            )
+
         if dlg.exec_() != QDialog.Accepted:
             return
-        if composition_widget is not None:
-            composition_widget.setText(dlg.composition_name())
+
+        if mode == "source_profile":
+            if profile_widget is not None:
+                profile_widget.setText(dlg.source_profile_id())
+            if clip_widget is not None:
+                clip_widget.setText(dlg.clip_id())
+        else:
+            if composition_widget is not None:
+                composition_widget.setText(dlg.composition_name())
+            if overrides_widget is not None:
+                overrides_widget.setText(dlg.composition_overrides_json())
         if cast_widget is not None:
             cast_widget.setText(dlg.cast_entries_json())
-        if overrides_widget is not None:
-            overrides_widget.setText(dlg.composition_overrides_json())
         self._refresh_scene_cast_summary()
 
     def _refresh_scene_cast_summary(self):
         if not hasattr(self, "scene_cast_summary_label"):
             return
-        composition_widget = self._scene_cast_entries.get("composition_name")
+        mode = self._scene_cast_mode()
         cast_widget = self._scene_cast_entries.get("cast_entries_json")
-        composition_name = composition_widget.text().strip() if composition_widget else ""
         try:
             raw_entries = json.loads(cast_widget.text()) if cast_widget and cast_widget.text().strip() else []
         except Exception:
@@ -361,15 +393,34 @@ class GenerateMediaDialog(QDialog):
             raw_entries = []
 
         parts = []
-        if composition_name:
-            parts.append("Composition: {}".format(composition_name))
-        for cast_entry in raw_entries:
-            if not isinstance(cast_entry, dict):
-                continue
-            marker = "★ " if cast_entry.get("primary") else ""
-            parts.append("{}{}: {}".format(
-                marker, cast_entry.get("subject_id", "?"), cast_entry.get("bundle_id", "?"),
-            ))
+        if mode == "source_profile":
+            profile_widget = self._scene_cast_entries.get("source_profile_id")
+            clip_widget = self._scene_cast_entries.get("clip_id")
+            profile_id = profile_widget.text().strip() if profile_widget else ""
+            clip_id = clip_widget.text().strip() if clip_widget else ""
+            if profile_id:
+                parts.append("Source Profile: {}".format(profile_id))
+            if clip_id:
+                parts.append("Clip: {}".format(clip_id))
+            for cast_entry in raw_entries:
+                if not isinstance(cast_entry, dict):
+                    continue
+                marker = "★ " if cast_entry.get("primary") else ""
+                parts.append("{}{} → {}".format(
+                    marker, cast_entry.get("source_subject_id", "?"), cast_entry.get("bundle_id", "?"),
+                ))
+        else:
+            composition_widget = self._scene_cast_entries.get("composition_name")
+            composition_name = composition_widget.text().strip() if composition_widget else ""
+            if composition_name:
+                parts.append("Composition: {}".format(composition_name))
+            for cast_entry in raw_entries:
+                if not isinstance(cast_entry, dict):
+                    continue
+                marker = "★ " if cast_entry.get("primary") else ""
+                parts.append("{}{}: {}".format(
+                    marker, cast_entry.get("subject_id", "?"), cast_entry.get("bundle_id", "?"),
+                ))
         self.scene_cast_summary_label.setText(" · ".join(parts) if parts else "No cast selected.")
 
     def _maybe_prefill_scene_cast(self):
@@ -380,7 +431,13 @@ class GenerateMediaDialog(QDialog):
         template switch) since both steps involve real I/O (a local ffprobe shell-out, then an
         HTTP call to fbTools). Any failure/absence leaves the widget exactly as it started --
         this is pure convenience, never a hard requirement for the dialog to work.
+
+        Composition-mode only: the resolved metadata gives back a composition_name/primary
+        subject+bundle, which has nothing to map onto a source_profile_id/clip_id pair, so
+        source_profile-mode templates are left for the user to fill in by hand.
         """
+        if self._scene_cast_mode() != "composition":
+            return
         if self._scene_cast_prefill_attempted or not callable(self._cast_metadata_resolver):
             return
         self._scene_cast_prefill_attempted = True

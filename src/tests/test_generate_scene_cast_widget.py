@@ -51,6 +51,15 @@ def _scene_cast_template(extra_group_label=None):
     return [{"id": "t1", "name": "Scene Cast Generate", "template": {"extra_inputs": entries}}]
 
 
+def _source_profile_scene_cast_template():
+    entries = [
+        {"key": "source_profile_id", "type": "text", "group": "scene_cast", "group_label": "Scene Cast (Source Profile)"},
+        {"key": "clip_id", "type": "text", "group": "scene_cast"},
+        {"key": "cast_entries_json", "type": "text", "group": "scene_cast", "default": "[]"},
+    ]
+    return [{"id": "t3", "name": "Scene Cast Generate (Source Profile)", "template": {"extra_inputs": entries}}]
+
+
 class SceneCastWidgetTests(unittest.TestCase):
     def test_grouped_entries_build_one_summary_row_not_three_text_fields(self):
         dlg = GenerateMediaDialog(templates=_scene_cast_template())
@@ -230,6 +239,103 @@ class SceneCastWidgetTests(unittest.TestCase):
         with patch.object(dlg, "accept") as mock_accept:
             dlg._on_generate_clicked()
         mock_accept.assert_called_once()
+
+
+class SceneCastSourceProfileModeTests(unittest.TestCase):
+    """Source-Profile-mode scene_cast templates share the same grouped-widget machinery as
+    Composition mode, but with a different key set -- mode is detected purely from which keys
+    the template declares (see GenerateMediaDialog._scene_cast_mode)."""
+
+    def test_mode_detected_from_declared_keys(self):
+        dlg = GenerateMediaDialog(templates=_source_profile_scene_cast_template())
+        self.assertEqual(dlg._scene_cast_mode(), "source_profile")
+
+    def test_composition_template_still_detected_as_composition_mode(self):
+        dlg = GenerateMediaDialog(templates=_scene_cast_template())
+        self.assertEqual(dlg._scene_cast_mode(), "composition")
+
+    def test_defaults_to_reference_tab_same_as_composition_mode(self):
+        dlg = GenerateMediaDialog(templates=_source_profile_scene_cast_template())
+        self.assertIs(dlg.tabs.currentWidget(), dlg.page_reference)
+
+    def test_empty_state_shows_no_cast_selected(self):
+        dlg = GenerateMediaDialog(templates=_source_profile_scene_cast_template())
+        self.assertEqual(dlg.scene_cast_summary_label.text(), "No cast selected.")
+
+    def test_summary_label_reflects_source_profile_cast_state(self):
+        dlg = GenerateMediaDialog(templates=_source_profile_scene_cast_template())
+        profile_widget, _ = dlg._extra_input_widgets["source_profile_id"]
+        clip_widget, _ = dlg._extra_input_widgets["clip_id"]
+        cast_widget, _ = dlg._extra_input_widgets["cast_entries_json"]
+        profile_widget.setText("team_fort")
+        clip_widget.setText("clip_1")
+        cast_widget.setText(json.dumps([
+            {"subject_id": "alex", "bundle_id": "alex_bundle", "source_profile_id": "team_fort",
+             "source_subject_id": "s1", "primary": True},
+        ]))
+        dlg._refresh_scene_cast_summary()
+        text = dlg.scene_cast_summary_label.text()
+        self.assertIn("team_fort", text)
+        self.assertIn("clip_1", text)
+        self.assertIn("s1", text)
+        self.assertIn("alex_bundle", text)
+
+    def test_prefill_never_attempted_for_source_profile_mode(self):
+        resolver = MagicMock(return_value={"composition_name": "wide_shot"})
+        dlg = GenerateMediaDialog(templates=_source_profile_scene_cast_template(), cast_metadata_resolver=resolver)
+        resolver.assert_not_called()
+        self.assertEqual(dlg.scene_cast_summary_label.text(), "No cast selected.")
+
+    def test_edit_cast_opens_dialog_in_source_profile_mode_and_writes_back(self):
+        dlg = GenerateMediaDialog(templates=_source_profile_scene_cast_template())
+        fake_builder = MagicMock()
+        fake_builder.exec_.return_value = QDialog.Accepted
+        fake_builder.source_profile_id.return_value = "team_fort"
+        fake_builder.clip_id.return_value = "clip_1"
+        fake_builder.cast_entries_json.return_value = json.dumps([
+            {"subject_id": "alex", "bundle_id": "alex_bundle", "source_profile_id": "team_fort",
+             "source_subject_id": "s1", "primary": True},
+        ])
+
+        with patch.object(generate_module, "SceneCastBuilderDialog", return_value=fake_builder) as ctor:
+            dlg._edit_scene_cast_clicked()
+
+        ctor.assert_called_once()
+        _args, kwargs = ctor.call_args
+        self.assertEqual(kwargs["mode"], "source_profile")
+
+        profile_widget, _ = dlg._extra_input_widgets["source_profile_id"]
+        clip_widget, _ = dlg._extra_input_widgets["clip_id"]
+        cast_widget, _ = dlg._extra_input_widgets["cast_entries_json"]
+        self.assertEqual(profile_widget.text(), "team_fort")
+        self.assertEqual(clip_widget.text(), "clip_1")
+        self.assertEqual(json.loads(cast_widget.text())[0]["source_subject_id"], "s1")
+        self.assertIn("team_fort", dlg.scene_cast_summary_label.text())
+
+    def test_edit_cast_rejected_leaves_widgets_unchanged(self):
+        dlg = GenerateMediaDialog(templates=_source_profile_scene_cast_template())
+        profile_widget, _ = dlg._extra_input_widgets["source_profile_id"]
+        profile_widget.setText("original")
+        fake_builder = MagicMock()
+        fake_builder.exec_.return_value = QDialog.Rejected
+
+        with patch.object(generate_module, "SceneCastBuilderDialog", return_value=fake_builder):
+            dlg._edit_scene_cast_clicked()
+
+        self.assertEqual(profile_widget.text(), "original")
+        fake_builder.source_profile_id.assert_not_called()
+
+    def test_missing_input_message_points_at_edit_cast_for_source_profile_mode_too(self):
+        dlg = GenerateMediaDialog(templates=_source_profile_scene_cast_template())
+        dlg.name_edit.setText("my_generation")
+        with patch.object(generate_module, "QMessageBox") as mock_box, \
+                patch.object(dlg.scene_cast_edit_button, "setFocus") as mock_set_focus:
+            dlg._on_generate_clicked()
+        mock_box.warning.assert_called_once()
+        title, message = mock_box.warning.call_args[0][1], mock_box.warning.call_args[0][2]
+        self.assertEqual(title, "Missing Input")
+        self.assertIn("Edit Cast", message)
+        mock_set_focus.assert_called_once()
 
 
 if __name__ == "__main__":

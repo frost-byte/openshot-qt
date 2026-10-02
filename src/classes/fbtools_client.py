@@ -99,6 +99,18 @@ class FBToolsClient:
         items = data.get("backgrounds", data) if isinstance(data, dict) else data
         return items if isinstance(items, list) else []
 
+    def list_source_profiles(self):
+        """Return the list of source profile summaries (`{id, name, media_type, subject_count, ...}`)."""
+        data = self._get("/fbtools/source_profiles/list")
+        items = data.get("profiles", []) if isinstance(data, dict) else []
+        return items if isinstance(items, list) else []
+
+    def get_source_profile(self, profile_id):
+        """Return the full source profile dict for `profile_id`, including its own `clips`
+        (each with a scoped `subjects` list -- who's actually in that segment) and the
+        profile-wide `subjects` roster."""
+        return self._get("/fbtools/source_profiles/get", {"id": profile_id})
+
     def inspect_cast_metadata(self, prompt_graph=None, cast_summary=None):
         """POST a clip's locally-read embedded metadata and get back the resolved
         {composition_name, composition, primary_subject, primary_bundle, tags, note}."""
