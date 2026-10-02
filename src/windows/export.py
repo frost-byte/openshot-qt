@@ -56,7 +56,7 @@ from classes.logger import log
 from classes.app import get_app
 from classes.feedback import record_feedback_action
 from classes.metrics import track_metric_screen, track_metric_error
-from classes.query import File, Clip
+from classes.query import File, file_is_on_timeline as _file_is_on_timeline
 
 import json
 
@@ -85,14 +85,6 @@ def _find_file_by_normalized_path(export_file_path):
         if existing_target == target:
             return existing
     return None
-
-
-def _file_is_on_timeline(file_id):
-    """True if any timeline clip currently references `file_id`."""
-    return any(
-        isinstance(clip.data, dict) and clip.data.get("file_id") == file_id
-        for clip in Clip.filter()
-    )
 
 
 class Export(QDialog):

@@ -5,8 +5,8 @@
 
 import os
 
-from qt_api import QRectF
-from qt_api import QPainter
+from qt_api import Qt, QRectF, QPointF
+from qt_api import QPainter, QPen, QBrush, QColor
 from qt_api import QSvgRenderer
 
 from classes import info
@@ -77,4 +77,55 @@ def paint_proxy_badge(painter, deco_rect, proxy_state):
     painter.setOpacity(0.95)
     renderer = QSvgRenderer(icon_path)
     renderer.render(painter, glyph_rect)
+    painter.restore()
+
+
+_TIMELINE_BADGE_FILL = QColor("#2ECC71")
+_TIMELINE_BADGE_RING = QColor(255, 255, 255, 220)
+_TIMELINE_BADGE_CHECK = QColor("#FFFFFF")
+
+
+def paint_timeline_usage_badge(painter, deco_rect, in_timeline):
+    """Paint a top-right green checkmark badge for a file currently referenced by
+    at least one clip on the timeline. Drawn directly (no SVG asset) in the corner
+    opposite paint_proxy_badge's bottom-right proxy-state badge, so the two never
+    overlap when a file is both proxy-cached and on the timeline."""
+    if not in_timeline:
+        return
+    if not deco_rect or not deco_rect.isValid():
+        return
+
+    badge_size = max(14.0, min(deco_rect.width(), deco_rect.height()) * 0.26)
+    margin = 2.0
+    badge_rect = QRectF(
+        deco_rect.right() - badge_size - margin,
+        deco_rect.top() + margin,
+        badge_size,
+        badge_size,
+    )
+
+    painter.save()
+    painter.setRenderHint(QPainter.Antialiasing, True)
+    painter.setOpacity(0.95)
+
+    ring_width = max(1.0, badge_size * 0.08)
+    painter.setPen(QPen(_TIMELINE_BADGE_RING, ring_width))
+    painter.setBrush(QBrush(_TIMELINE_BADGE_FILL))
+    painter.drawEllipse(badge_rect)
+
+    check_pen = QPen(_TIMELINE_BADGE_CHECK)
+    check_pen.setWidthF(max(1.5, badge_size * 0.16))
+    check_pen.setCapStyle(Qt.RoundCap)
+    check_pen.setJoinStyle(Qt.RoundJoin)
+    painter.setPen(check_pen)
+
+    cx = badge_rect.center().x()
+    cy = badge_rect.center().y()
+    r = badge_size * 0.5
+    p1 = QPointF(cx - r * 0.5, cy)
+    p2 = QPointF(cx - r * 0.1, cy + r * 0.4)
+    p3 = QPointF(cx + r * 0.5, cy - r * 0.35)
+    painter.drawLine(p1, p2)
+    painter.drawLine(p2, p3)
+
     painter.restore()

@@ -41,10 +41,10 @@ from qt_api import (
 from classes import info
 from classes.app import get_app
 from classes.logger import log
-from classes.query import File
+from classes.query import File, file_is_on_timeline
 from classes.qt_types import font_metrics_horizontal_advance
 from .ai_tools_menu import add_ai_tools_menu
-from .files_thumbnail_overlay import paint_media_overlay, paint_proxy_badge
+from .files_thumbnail_overlay import paint_media_overlay, paint_proxy_badge, paint_timeline_usage_badge
 from .menu import StyledContextMenu, add_bound_action
 from .optimized_preview_menu import add_optimized_preview_menu
 
@@ -111,6 +111,9 @@ class FilesListProgressDelegate(QStyledItemDelegate):
             file_obj = File.get(id=file_id)
             if file_obj:
                 paint_proxy_badge(painter, deco_rect, proxy_service.get_proxy_state(file_obj))
+
+        if file_id and not _is_generation_placeholder(file_id) and str(media_type or "").strip().lower() == "video":
+            paint_timeline_usage_badge(painter, deco_rect, file_is_on_timeline(file_id))
 
         self._paint_progress_bar(painter, deco_rect, generation_badge, QColor("#53A0ED"), 0)
         self._paint_progress_bar(painter, deco_rect, proxy_badge, QColor("#3AA1FF"), 1)

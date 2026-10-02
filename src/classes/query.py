@@ -204,6 +204,15 @@ class Clip(QueryObject):
                     return name
         return os.path.basename(path) if path else (self.data.get("title") or "")
 
+
+def file_is_on_timeline(file_id):
+    """True if any timeline clip currently references `file_id`."""
+    return any(
+        isinstance(clip.data, dict) and clip.data.get("file_id") == file_id
+        for clip in Clip.filter()
+    )
+
+
 class Transition(QueryObject):
     """ This class allows Transitions (i.e. timeline effects) to be queried, updated, and deleted from the project data. """
     object_name = "effects"  # Derived classes should define this

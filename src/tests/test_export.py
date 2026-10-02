@@ -69,22 +69,13 @@ class ExportDuplicateDetectionTests(unittest.TestCase):
             result = module._find_file_by_normalized_path("/media/clip.mp4")
         self.assertIsNone(result)
 
-    def test_file_is_on_timeline_true_when_a_clip_references_it(self):
+    def test_file_is_on_timeline_reexported_from_classes_query(self):
+        # export.py no longer defines this itself (classes/query.py::file_is_on_timeline
+        # is now the single shared implementation -- see test_query_timeline_usage.py for
+        # its behavior) -- just confirm the re-export under its original name still works.
+        from classes.query import file_is_on_timeline
         module = self.export_module
-        clip = types.SimpleNamespace(data={"file_id": "F1"})
-        with patch.object(module.Clip, "filter", return_value=[clip]):
-            self.assertTrue(module._file_is_on_timeline("F1"))
-
-    def test_file_is_on_timeline_false_when_no_clip_references_it(self):
-        module = self.export_module
-        clip = types.SimpleNamespace(data={"file_id": "F2"})
-        with patch.object(module.Clip, "filter", return_value=[clip]):
-            self.assertFalse(module._file_is_on_timeline("F1"))
-
-    def test_file_is_on_timeline_false_for_empty_timeline(self):
-        module = self.export_module
-        with patch.object(module.Clip, "filter", return_value=[]):
-            self.assertFalse(module._file_is_on_timeline("F1"))
+        self.assertIs(module._file_is_on_timeline, file_is_on_timeline)
 
 
 if __name__ == "__main__":
