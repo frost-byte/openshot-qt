@@ -5395,7 +5395,13 @@ class MainWindow(updates.UpdateWatcher, QMainWindow):
         self.generation_queue.job_finished.connect(self._on_generation_job_finished)
         self._init_generation_actions()
         self._init_proxy_actions()
-        self.refresh_comfy_availability_async()
+        # timeout=0.5 (the default) reliably times out before a cross-machine ComfyUI
+        # instance (e.g. over WSL2 to a LAN host) can respond -- this check only ever runs
+        # once, at startup, and caches whatever it gets for the rest of the session, so a
+        # timeout here permanently hides every AI Tools menu in the app until a manual
+        # refresh (Preferences > Experimental) or a restart. 5s gives real margin over a
+        # measured ~2.6s round trip for this kind of connection.
+        self.refresh_comfy_availability_async(timeout=5.0)
 
         # Add window as watcher to receive undo/redo status updates
         app.updates.add_watcher(self)

@@ -869,7 +869,10 @@ class Preferences(QDialog):
             except RuntimeError:
                 return
 
-        window.refresh_comfy_availability_async(timeout=2.0, callback=_handle_result)
+        # 2.0s used to be the margin here, but a measured real-world cross-machine round
+        # trip (WSL2 -> LAN ComfyUI host) came in at ~2.6s -- see the matching startup-check
+        # comment in main_window.py. 5s leaves real headroom instead of being borderline.
+        window.refresh_comfy_availability_async(timeout=5.0, callback=_handle_result)
 
     def _update_comfy_ui_check_button(self, btn, available, tooltip, enabled, clear_icon=False, pending=None):
         if not btn:
