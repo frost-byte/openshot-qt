@@ -117,6 +117,17 @@ class BuildOverridesJsonTests(unittest.TestCase):
         self.assertNotIn("background_as_reference", result)
 
 
+class BuildBackgroundOverrideIdTests(unittest.TestCase):
+    def test_default_sentinel_returns_empty_string(self):
+        self.assertEqual(scb.build_background_override_id(scb._USE_COMPOSITION_DEFAULT), "")
+
+    def test_explicit_none_returns_none_string(self):
+        self.assertEqual(scb.build_background_override_id("none"), "none")
+
+    def test_background_id_returned_as_is(self):
+        self.assertEqual(scb.build_background_override_id("rooftop"), "rooftop")
+
+
 class FindClipTests(unittest.TestCase):
     def test_returns_matching_clip(self):
         profile = {"clips": [{"id": "clip_1", "action": "a"}, {"id": "clip_2", "action": "b"}]}
@@ -303,11 +314,17 @@ class SceneCastBuilderDialogTests(unittest.TestCase):
         self.assertEqual(dlg._slot_widgets, {})
 
 
-def _fake_source_profile_client(profiles=None, bundles=None, profile_by_id=None):
+def _fake_source_profile_client(profiles=None, bundles=None, backgrounds=None, profile_by_id=None):
     client = MagicMock()
     client.list_source_profiles.return_value = profiles or []
     client.list_bundles.return_value = bundles or []
+    client.list_backgrounds.return_value = backgrounds or []
     client.get_source_profile.side_effect = lambda pid: (profile_by_id or {}).get(pid)
+    # A real-ish return (not an unconfigured MagicMock's default) so a test that lets a real
+    # fetch thread run to completion doesn't risk _on_frame_fetched later choking on
+    # QPixmap.loadFromData() being handed a MagicMock instead of bytes if that queued
+    # cross-thread signal ever gets processed (e.g. during a later test's own event pump).
+    client.get_source_profile_frame.return_value = b"fake-thumbnail-bytes"
     return client
 
 
@@ -339,6 +356,7 @@ class SceneCastBuilderDialogSourceProfileModeTests(unittest.TestCase):
         self.assertEqual(dlg.source_profile_combo.count(), 1)  # just the placeholder
         self.assertEqual(dlg.cast_entries_json(), "[]")
         self.assertEqual(dlg.composition_overrides_json(), "{}")
+        self.assertEqual(dlg.background_override_id(), "")
 
     def test_selecting_profile_populates_clip_combo(self):
         client = _fake_source_profile_client(
@@ -436,6 +454,53 @@ class SceneCastBuilderDialogSourceProfileModeTests(unittest.TestCase):
         self.assertEqual(dlg.composition_name(), "")
         self.assertFalse(hasattr(dlg, "composition_combo"))
         self.assertFalse(hasattr(dlg, "background_combo"))
+        self.assertTrue(hasattr(dlg, "source_background_combo"))
+
+    def test_background_override_combo_populated_from_client(self):
+        client = _fake_source_profile_client(backgrounds=[{"id": "rooftop", "name": "Rooftop"}])
+        dlg = scb.SceneCastBuilderDialog(fbtools_client=client, mode="source_profile")
+        labels = [dlg.source_background_combo.itemText(i) for i in range(dlg.source_background_combo.count())]
+        self.assertIn("Rooftop", labels)
+        self.assertIn("(use clip/profile default)", labels)
+        self.assertIn("(none, this run)", labels)
+
+    def test_background_override_defaults_to_empty(self):
+        client = _fake_source_profile_client(backgrounds=[{"id": "rooftop", "name": "Rooftop"}])
+        dlg = scb.SceneCastBuilderDialog(fbtools_client=client, mode="source_profile")
+        self.assertEqual(dlg.background_override_id(), "")
+
+    def test_selecting_none_background_override(self):
+        client = _fake_source_profile_client(backgrounds=[{"id": "rooftop", "name": "Rooftop"}])
+        dlg = scb.SceneCastBuilderDialog(fbtools_client=client, mode="source_profile")
+        dlg.source_background_combo.setCurrentIndex(dlg.source_background_combo.findData("none"))
+        self.assertEqual(dlg.background_override_id(), "none")
+
+    def test_selecting_a_background_override(self):
+        client = _fake_source_profile_client(backgrounds=[{"id": "rooftop", "name": "Rooftop"}])
+        dlg = scb.SceneCastBuilderDialog(fbtools_client=client, mode="source_profile")
+        dlg.source_background_combo.setCurrentIndex(dlg.source_background_combo.findData("rooftop"))
+        self.assertEqual(dlg.background_override_id(), "rooftop")
+
+    def test_initial_background_override_id_preselects_combo(self):
+        client = _fake_source_profile_client(backgrounds=[{"id": "rooftop", "name": "Rooftop"}])
+        dlg = scb.SceneCastBuilderDialog(
+            fbtools_client=client, mode="source_profile", background_override_id="rooftop",
+        )
+        self.assertEqual(dlg.source_background_combo.currentData(), "rooftop")
+        self.assertEqual(dlg.background_override_id(), "rooftop")
+
+    def test_initial_background_override_id_none_preselects_none_option(self):
+        client = _fake_source_profile_client(backgrounds=[{"id": "rooftop", "name": "Rooftop"}])
+        dlg = scb.SceneCastBuilderDialog(
+            fbtools_client=client, mode="source_profile", background_override_id="none",
+        )
+        self.assertEqual(dlg.source_background_combo.currentData(), "none")
+        self.assertEqual(dlg.background_override_id(), "none")
+
+    def test_background_override_id_absent_in_composition_mode(self):
+        dlg = scb.SceneCastBuilderDialog(fbtools_client=None, mode="composition")
+        self.assertEqual(dlg.background_override_id(), "")
+        self.assertFalse(hasattr(dlg, "source_background_combo"))
 
     def test_get_source_profile_failure_does_not_crash(self):
         client = _fake_source_profile_client(profiles=[{"id": "team_fort", "name": "Team Fort"}])
@@ -486,6 +551,82 @@ class ClipPreviewTests(unittest.TestCase):
         dlg = scb.SceneCastBuilderDialog(fbtools_client=None, mode="source_profile")
         dlg._update_clip_preview()
         self.assertEqual(dlg.clip_thumbnail_label.text(), "No preview")
+
+    def test_fetch_thread_is_not_parented_to_dialog(self):
+        """Regression test for a SIGABRT crash ("QThread: Destroyed while thread is still
+        running"): the fetch thread must not be parented to this (or any ancestor) dialog,
+        or Qt's child-destruction cascade tries to tear down a still-running QThread the
+        moment the dialog is closed before a slow fbTools response arrives. Calls the real
+        (unmocked) _fetch_clip_thumbnail -- safe here since fbtools_client is a MagicMock,
+        so the worker's HTTP call returns instantly with no real network I/O."""
+        client = _fake_source_profile_client(profiles=[{"id": "team_fort", "name": "Team Fort"}])
+        dlg = scb.SceneCastBuilderDialog(fbtools_client=client, mode="source_profile")
+        dlg._fetch_clip_thumbnail("team_fort", 1.5, dlg._frame_request_id)
+        self.assertEqual(len(dlg._frame_threads), 1)
+        thread, _worker = dlg._frame_threads[0]
+        self.assertIsNone(thread.parent())
+        self.assertTrue(thread.wait(2000), "worker thread did not finish in time")
+        # The real bug this whole chain traced back to: the thread finishing (or even
+        # claiming to) is NOT proof worker.run() actually executed -- if worker itself got
+        # garbage collected first (no reference held anywhere but this method's own local
+        # variable), thread.started never has anything to invoke and the fetch silently
+        # never happens at all, with no exception and nothing in the log. The only real
+        # proof is that the underlying client call was actually made.
+        client.get_source_profile_frame.assert_called_once_with("team_fort", 1.5, width=scb._THUMBNAIL_WIDTH)
+
+    def test_worker_is_kept_alive_until_its_own_thread_finishes(self):
+        """Regression test: _frame_threads must track the worker alongside its thread, not
+        just the thread. A worker with no other Python reference and no Qt parent is
+        destroyed the instant _fetch_clip_thumbnail() returns (immediately after
+        thread.start(), well before the OS schedules the new thread to actually run) unless
+        something keeps it alive -- silently preventing thread.started from ever having
+        anything to invoke. No exception, no log output: just a thumbnail stuck on
+        "Loading..." forever. This is exactly what "stayed stuck on Loading after the crash
+        fix" turned out to be."""
+        client = _fake_source_profile_client(profiles=[{"id": "team_fort", "name": "Team Fort"}])
+        dlg = scb.SceneCastBuilderDialog(fbtools_client=client, mode="source_profile")
+        dlg._fetch_clip_thumbnail("team_fort", 1.5, dlg._frame_request_id)
+        thread, worker = dlg._frame_threads[0]
+        self.assertIsNotNone(worker)
+        thread.wait(2000)
+        client.get_source_profile_frame.assert_called_once()
+
+    def test_overlapping_fetches_do_not_drop_an_in_flight_thread(self):
+        """Regression test for the "stuck on Loading forever" bug: a second fetch starting
+        before the first one's finished signal has fired must not replace the only reference
+        to the still-running first thread (the old single-slot self._frame_thread did exactly
+        that) -- both must stay tracked in _frame_threads until each genuinely finishes."""
+        client = _fake_source_profile_client(profiles=[{"id": "team_fort", "name": "Team Fort"}])
+        dlg = scb.SceneCastBuilderDialog(fbtools_client=client, mode="source_profile")
+        dlg._fetch_clip_thumbnail("team_fort", 1.0, 1)
+        first_pair = dlg._frame_threads[0]
+        dlg._fetch_clip_thumbnail("team_fort", 2.0, 2)
+        # The first (thread, worker) pair must still be tracked (not silently dropped) even
+        # though a second fetch has already started -- both get a chance to finish and clean
+        # themselves up.
+        self.assertIn(first_pair, dlg._frame_threads)
+        for thread, _worker in list(dlg._frame_threads):
+            thread.wait(2000)
+        self.assertEqual(client.get_source_profile_frame.call_count, 2)
+
+    def test_select_initial_clip_fetches_thumbnail_only_once(self):
+        """Regression test: _select_initial_clip() calls _on_clip_changed once via the
+        combo's signal (when setCurrentIndex actually changes the index) and once directly
+        (to guarantee it ran at least once, matching _on_composition_changed's own pattern)
+        -- _on_clip_changed must de-duplicate those into a single thumbnail fetch, not two."""
+        with patch.object(scb.SceneCastBuilderDialog, "_fetch_clip_thumbnail") as fetch_mock:
+            client = _fake_source_profile_client(
+                profiles=[{"id": "team_fort", "name": "Team Fort"}],
+                profile_by_id={"team_fort": {
+                    "id": "team_fort", "subjects": [],
+                    "clips": [{"id": "clip_1", "action": "x", "start_time": 0.0}],
+                }},
+            )
+            scb.SceneCastBuilderDialog(
+                fbtools_client=client, mode="source_profile",
+                source_profile_id="team_fort", clip_id="clip_1",
+            )
+        fetch_mock.assert_called_once()
 
     def test_on_frame_fetched_sets_pixmap_for_current_request(self):
         dlg, _fetch_mock = self._dialog_on_clip({"id": "clip_1", "action": "x", "start_time": 0.0})

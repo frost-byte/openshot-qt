@@ -139,7 +139,7 @@ KNOWN_NODE_TYPES = {
 }
 
 
-EXTRA_INPUT_TYPES = {"image", "video", "audio", "text", "choice"}
+EXTRA_INPUT_TYPES = {"image", "video", "audio", "text", "choice", "bundle"}
 EXTRA_INPUT_KEY_PATTERN = re.compile(r"^[a-z0-9_]+$")
 
 

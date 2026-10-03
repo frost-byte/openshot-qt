@@ -56,13 +56,31 @@ class _ClipFrameFetchWorker(QObject):
         self._request_id = request_id
 
     def run(self):
+        # Visible at the default log level (INFO) on purpose: a "stuck on Loading forever"
+        # report with NOTHING from this worker in the log -- not even the "started" line --
+        # means run() itself never got dispatched (a threading issue), not a slow/failing
+        # HTTP call. The old log.debug() on the exception path was invisible by default
+        # (info.LOG_LEVEL_FILE/CONSOLE are both "INFO"), so a real failure here could have
+        # been happening silently on every attempt with nothing to show for it.
+        log.info(
+            "SceneCastBuilderDialog: thumbnail fetch started (request_id=%s, profile=%s, t=%s)",
+            self._request_id, self._profile_id, self._timestamp,
+        )
         try:
             data = self._fbtools_client.get_source_profile_frame(
                 self._profile_id, self._timestamp, width=_THUMBNAIL_WIDTH,
             )
         except Exception as ex:
-            log.debug("SceneCastBuilderDialog: clip thumbnail fetch failed: %s", ex)
+            log.warning(
+                "SceneCastBuilderDialog: thumbnail fetch failed (request_id=%s): %s",
+                self._request_id, ex,
+            )
             data = None
+        else:
+            log.info(
+                "SceneCastBuilderDialog: thumbnail fetch finished (request_id=%s, bytes=%s)",
+                self._request_id, len(data) if data else 0,
+            )
         self.finished.emit(self._request_id, data)
 
 
@@ -202,6 +220,18 @@ def build_overrides_json(background_value, background_as_reference):
     return json.dumps(overrides)
 
 
+def build_background_override_id(background_value):
+    """background_value: _USE_COMPOSITION_DEFAULT (no override) / "none" / a background id ->
+    the background_override_id string fbTools' SceneCastBuild expects (nodes/scene_casts.py).
+    Source Profile mode's own mechanism -- NOT JSON (unlike build_overrides_json above, which
+    is Composition mode's composition_overrides_json): empty means "use the clip's own
+    background_id, falling back to the profile's default_background_id"; "none" means
+    explicitly no background for this run."""
+    if background_value is _USE_COMPOSITION_DEFAULT:
+        return ""
+    return str(background_value)
+
+
 class SceneCastBuilderDialog(QDialog):
     """Modal "assign a Subject/Bundle per slot" builder -- the OpenShot-side analogue of
     fbTools' own Scene Cast Build ComfyUI node. Lists live data from fbTools' REST API via
@@ -228,6 +258,7 @@ class SceneCastBuilderDialog(QDialog):
         composition_overrides_json="{}",
         source_profile_id="",
         clip_id="",
+        background_override_id="",
         parent=None,
     ):
         super().__init__(parent)
@@ -238,6 +269,7 @@ class SceneCastBuilderDialog(QDialog):
         self._initial_overrides = parse_overrides_json(composition_overrides_json)
         self._initial_source_profile_id = str(source_profile_id or "").strip()
         self._initial_clip_id = str(clip_id or "").strip()
+        self._initial_background_override_id = str(background_override_id or "").strip()
 
         self._bundles = []
         self._backgrounds = []
@@ -248,7 +280,10 @@ class SceneCastBuilderDialog(QDialog):
         self._primary_group = QButtonGroup(self)
         self._primary_group.setExclusive(True)
         self._frame_request_id = 0
-        self._frame_thread = None
+        self._last_processed_clip_id = None
+        # (thread, worker) kept alive here only until each one's own finished signal removes
+        # it -- see _fetch_clip_thumbnail for why this must never be a single-slot reference.
+        self._frame_threads = []
 
         self.setObjectName("sceneCastBuilderDialog")
         self.setWindowTitle("Edit Scene Cast")
@@ -271,6 +306,8 @@ class SceneCastBuilderDialog(QDialog):
 
         if self.mode == "composition":
             root.addLayout(self._build_background_form())
+        else:
+            root.addLayout(self._build_source_background_form())
 
         button_row = QHBoxLayout()
         button_row.addStretch(1)
@@ -333,10 +370,20 @@ class SceneCastBuilderDialog(QDialog):
         background_form.addRow("", self.background_as_reference_check)
         return background_form
 
+    def _build_source_background_form(self):
+        """Source Profile mode's own background override -- a single combo, no "as reference"
+        checkbox (SourceProfileClipPrompt always shows the resolved background as a reference
+        image when one is set; there's no toggle for it, unlike Composition mode)."""
+        background_form = QFormLayout()
+        self.source_background_combo = QComboBox()
+        background_form.addRow("Background Override", self.source_background_combo)
+        return background_form
+
     # ---- data loading ----
 
     def _load_data(self):
         self._bundles = self._safe_list("list_bundles")
+        self._backgrounds = self._safe_list("list_backgrounds")
 
         if self.mode == "source_profile":
             self._source_profiles = self._safe_list("list_source_profiles")
@@ -345,9 +392,18 @@ class SceneCastBuilderDialog(QDialog):
                     continue
                 label = profile.get("name") or profile.get("id", "")
                 self.source_profile_combo.addItem(str(label), profile.get("id", ""))
+
+            self.source_background_combo.clear()
+            self.source_background_combo.addItem("(use clip/profile default)", _USE_COMPOSITION_DEFAULT)
+            self.source_background_combo.addItem("(none, this run)", "none")
+            for background in self._backgrounds:
+                if not isinstance(background, dict):
+                    continue
+                label = background.get("name") or background.get("id", "")
+                self.source_background_combo.addItem(str(label), background.get("id", ""))
+            self._select_initial_background_override()
             return
 
-        self._backgrounds = self._safe_list("list_backgrounds")
         self.background_combo.clear()
         self.background_combo.addItem("(use Composition default)", _USE_COMPOSITION_DEFAULT)
         self.background_combo.addItem("(none)", "none")
@@ -400,6 +456,11 @@ class SceneCastBuilderDialog(QDialog):
         if index >= 0:
             self.clip_combo.setCurrentIndex(index)
         self._on_clip_changed(self.clip_combo.currentIndex())
+
+    def _select_initial_background_override(self):
+        value = self._initial_background_override_id or _USE_COMPOSITION_DEFAULT
+        index = self.source_background_combo.findData(value)
+        self.source_background_combo.setCurrentIndex(index if index >= 0 else 0)
 
     # ---- composition mode: slot rebuilding ----
 
@@ -483,17 +544,23 @@ class SceneCastBuilderDialog(QDialog):
     def _on_source_profile_changed(self, index):
         _ = index
         profile_id = str(self.source_profile_combo.currentData() or "").strip()
-        already_loaded = (
-            profile_id and self._loaded_source_profile is not None
-            and str(self._loaded_source_profile.get("id", "")) == profile_id
-        )
-        if not already_loaded:
-            self._loaded_source_profile = None
-            if profile_id and self.fbtools_client is not None:
-                try:
-                    self._loaded_source_profile = self.fbtools_client.get_source_profile(profile_id)
-                except Exception as ex:
-                    log.warning("SceneCastBuilderDialog: get_source_profile(%s) failed: %s", profile_id, ex)
+        if profile_id and self._loaded_source_profile is not None \
+                and str(self._loaded_source_profile.get("id", "")) == profile_id:
+            return  # already loaded (e.g. the initial-selection direct call after the signal
+            # fired) -- mirrors _on_composition_changed's own early-return guard. Unlike that
+            # one, this used to keep calling _rebuild_clip_combo() unconditionally even when
+            # already_loaded was true, which rebuilds the clip combo (clip_combo.clear() +
+            # re-populate) a second time -- clearing a combo with a selection emits its own
+            # currentIndexChanged(-1), which reset _on_clip_changed's own dedup state (see its
+            # comment) in between the two outer calls, letting a second real thumbnail fetch
+            # through despite that guard. Returning early here, before any of that, is what
+            # actually gets the fetch count down to one.
+        self._loaded_source_profile = None
+        if profile_id and self.fbtools_client is not None:
+            try:
+                self._loaded_source_profile = self.fbtools_client.get_source_profile(profile_id)
+            except Exception as ex:
+                log.warning("SceneCastBuilderDialog: get_source_profile(%s) failed: %s", profile_id, ex)
         self._rebuild_clip_combo()
 
     def _rebuild_clip_combo(self):
@@ -510,6 +577,19 @@ class SceneCastBuilderDialog(QDialog):
 
     def _on_clip_changed(self, index):
         _ = index
+        clip_id = str(self.clip_combo.currentData() or "").strip()
+        if clip_id and clip_id == self._last_processed_clip_id:
+            return  # already processed (e.g. the initial-selection direct call after the signal fired) --
+            # see _on_composition_changed's own matching guard. Without this, _select_initial_clip()
+            # fires this twice for every initial clip_id (once via the signal, once via its own direct
+            # call), each one unconditionally starting a NEW thumbnail-fetch thread (_update_clip_preview
+            # below) -- two network requests for one visible selection, and -- since fixing the SIGABRT
+            # crash below required no longer parenting that thread to this dialog -- the first (now
+            # orphaned) thread got destroyed via plain Python refcounting the instant the second call
+            # overwrote the single-slot thread reference, while possibly still mid-startup. That's an
+            # unsafe QThread teardown in its own right and is what caused the later "stuck on Loading
+            # forever" regression: not a slow network, a corrupted thread before it ever ran.
+        self._last_processed_clip_id = clip_id
         self._update_clip_preview()
         self._rebuild_slot_rows()
 
@@ -536,23 +616,58 @@ class SceneCastBuilderDialog(QDialog):
         self._fetch_clip_thumbnail(profile_id, start_time, self._frame_request_id)
 
     def _fetch_clip_thumbnail(self, profile_id, timestamp, request_id):
-        thread = QThread(self)
+        # Deliberately NOT parented to self (QThread(self)): this is a modal dialog that
+        # can be closed -- and torn down, possibly cascading from an ancestor dialog's own
+        # close -- before a slow fbTools response arrives (observed in practice when the
+        # ComfyUI queue is busy). Qt's child-destruction cascade cannot safely destroy a
+        # still-running QThread and hard-aborts ("QThread: Destroyed while thread is still
+        # running", SIGABRT) if one is still a child when its parent widget is deleted.
+        # Left unparented, the thread survives independently of this dialog's lifetime and
+        # cleans itself up via its own finished -> quit/deleteLater chain regardless --
+        # worst case it's an orphaned background thread for up to the fbtools_client call's
+        # own timeout (15s in FBToolsClient._get_bytes). A stale result arriving after this
+        # dialog is gone is already handled: PyQt auto-disconnects a signal from a deleted
+        # QObject's slot, and _on_frame_fetched's own request_id check discards anything
+        # superseded by a later clip selection even if this dialog is still alive.
+        thread = QThread()
         worker = _ClipFrameFetchWorker(self.fbtools_client, profile_id, timestamp, request_id)
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
         worker.finished.connect(self._on_frame_fetched)
-        worker.finished.connect(thread.quit)
+        # Direct, not the default queued cross-thread connection: `thread` belongs to the
+        # main thread, so a queued quit() would sit in the main event loop's queue until it's
+        # next pumped -- which may never happen before this dialog (or the whole process, in
+        # a headless unittest run) is torn down, leaving the background thread's own exec()
+        # loop still running and orphaned. A direct connection has the worker's own thread
+        # tell its event loop to quit immediately, with no dependency on the main loop at all.
+        worker.finished.connect(thread.quit, Qt.DirectConnection)
         worker.finished.connect(worker.deleteLater)
         thread.finished.connect(thread.deleteLater)
-        # Keep a reference so the thread isn't garbage-collected mid-flight; a later call
-        # simply replaces it once its own finished/deleteLater chain has run.
-        self._frame_thread = thread
+        thread.finished.connect(lambda t=thread: self._forget_frame_thread(t))
+        # Track the (thread, worker) PAIR, never just the thread: worker is a local variable
+        # here with no other Python reference and no parent, so the instant this method
+        # returns -- which happens immediately after thread.start(), well before the OS has
+        # actually scheduled the new thread to run -- CPython's refcounting destroys it on
+        # the spot unless something else keeps it alive. That silently prevents
+        # thread.started from ever actually invoking worker.run() at all: no exception, no
+        # log output, nothing -- just a thumbnail stuck on "Loading..." forever. This was the
+        # actual cause of the hang that unparenting the thread (see the comment above) did
+        # NOT fix; tracking the thread alone was never enough.
+        self._frame_threads.append((thread, worker))
         thread.start()
+
+    def _forget_frame_thread(self, thread):
+        self._frame_threads = [pair for pair in self._frame_threads if pair[0] is not thread]
 
     def _on_frame_fetched(self, request_id, data):
         if request_id != self._frame_request_id:
+            log.info(
+                "SceneCastBuilderDialog: discarding stale thumbnail result (request_id=%s, current=%s)",
+                request_id, self._frame_request_id,
+            )
             return  # superseded by a later Clip Segment selection -- drop this stale result
         if not data:
+            log.info("SceneCastBuilderDialog: thumbnail result empty (request_id=%s) -> No preview", request_id)
             self.clip_thumbnail_label.setText("No preview")
             return
         pixmap = QPixmap()
@@ -665,3 +780,8 @@ class SceneCastBuilderDialog(QDialog):
             self.background_combo.currentData(),
             self.background_as_reference_check.isChecked(),
         )
+
+    def background_override_id(self):
+        if self.mode != "source_profile":
+            return ""
+        return build_background_override_id(self.source_background_combo.currentData())

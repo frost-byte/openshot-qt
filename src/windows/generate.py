@@ -54,6 +54,7 @@ _SCENE_CAST_KEY_DEFAULTS = {
     "composition_overrides_json": "{}",
     "source_profile_id": "",
     "clip_id": "",
+    "background_override_id": "",
 }
 
 
@@ -285,6 +286,15 @@ class GenerateMediaDialog(QDialog):
                 default_value = entry.get("default")
                 if isinstance(default_value, str) and default_value in choices:
                     widget.setCurrentIndex(choices.index(default_value))
+            elif entry_type == "bundle":
+                widget = QComboBox()
+                widget.addItem("(none)", "")
+                self._populate_bundle_combo(widget)
+                default_value = entry.get("default")
+                if isinstance(default_value, str) and default_value:
+                    index = widget.findData(default_value)
+                    if index >= 0:
+                        widget.setCurrentIndex(index)
             else:
                 widget = QComboBox()
                 widget.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
@@ -335,6 +345,33 @@ class GenerateMediaDialog(QDialog):
             return "source_profile"
         return "composition"
 
+    def _resolve_source_profile_name(self, profile_id):
+        """Translate an internally-selected source-profile ID to the display name expected by
+        the fbTools workflow payload. The builder and the generated API contract use different
+        semantics: the builder stores IDs, but SourceProfileLoad.profile_name is a name field."""
+        profile_id = str(profile_id or "").strip()
+        if not profile_id:
+            return ""
+        if self.fbtools_client is None:
+            return profile_id
+
+        try:
+            profiles = self.fbtools_client.list_source_profiles() or []
+        except Exception:
+            profiles = []
+        for profile in profiles:
+            if isinstance(profile, dict) and str(profile.get("id") or "").strip() == profile_id:
+                name = str(profile.get("name") or profile.get("id") or "").strip()
+                if name:
+                    return name
+
+        try:
+            profile = self.fbtools_client.get_source_profile(profile_id) or {}
+        except Exception:
+            return profile_id
+        name = str(profile.get("name") or profile.get("id") or "").strip()
+        return name or profile_id
+
     def _edit_scene_cast_clicked(self):
         mode = self._scene_cast_mode()
         cast_widget = self._scene_cast_entries.get("cast_entries_json")
@@ -342,16 +379,18 @@ class GenerateMediaDialog(QDialog):
         if mode == "source_profile":
             profile_widget = self._scene_cast_entries.get("source_profile_id")
             clip_widget = self._scene_cast_entries.get("clip_id")
+            bg_override_widget = self._scene_cast_entries.get("background_override_id")
             dlg = SceneCastBuilderDialog(
                 fbtools_client=self.fbtools_client,
                 mode="source_profile",
                 source_profile_id=profile_widget.text() if profile_widget else "",
                 clip_id=clip_widget.text() if clip_widget else "",
                 cast_entries_json=cast_widget.text() if cast_widget else "[]",
+                background_override_id=bg_override_widget.text() if bg_override_widget else "",
                 parent=self,
             )
         else:
-            profile_widget = clip_widget = None
+            profile_widget = clip_widget = bg_override_widget = None
             composition_widget = self._scene_cast_entries.get("composition_name")
             overrides_widget = self._scene_cast_entries.get("composition_overrides_json")
             dlg = SceneCastBuilderDialog(
@@ -368,9 +407,18 @@ class GenerateMediaDialog(QDialog):
 
         if mode == "source_profile":
             if profile_widget is not None:
+                # Store the ID, not the resolved name: this widget's text is also what
+                # source_profile_id=... gets fed back into the next time "Edit Cast..." is
+                # opened (above), and the combo there is matched by ID (findData), not name --
+                # storing the name here would silently fail to re-select the profile/clip on
+                # a second edit. Name resolution happens where it's actually needed instead:
+                # _refresh_scene_cast_summary (display) and _collect_extra_input_values
+                # (the ComfyUI payload, which needs SourceProfileLoad's profile_name).
                 profile_widget.setText(dlg.source_profile_id())
             if clip_widget is not None:
                 clip_widget.setText(dlg.clip_id())
+            if bg_override_widget is not None:
+                bg_override_widget.setText(dlg.background_override_id())
         else:
             if composition_widget is not None:
                 composition_widget.setText(dlg.composition_name())
@@ -396,12 +444,18 @@ class GenerateMediaDialog(QDialog):
         if mode == "source_profile":
             profile_widget = self._scene_cast_entries.get("source_profile_id")
             clip_widget = self._scene_cast_entries.get("clip_id")
+            bg_override_widget = self._scene_cast_entries.get("background_override_id")
             profile_id = profile_widget.text().strip() if profile_widget else ""
             clip_id = clip_widget.text().strip() if clip_widget else ""
+            bg_override = bg_override_widget.text().strip() if bg_override_widget else ""
             if profile_id:
-                parts.append("Source Profile: {}".format(profile_id))
+                parts.append("Source Profile: {}".format(self._resolve_source_profile_name(profile_id) or profile_id))
             if clip_id:
                 parts.append("Clip: {}".format(clip_id))
+            if bg_override == "none":
+                parts.append("Background: (none)")
+            elif bg_override:
+                parts.append("Background: {}".format(bg_override))
             for cast_entry in raw_entries:
                 if not isinstance(cast_entry, dict):
                     continue
@@ -471,9 +525,20 @@ class GenerateMediaDialog(QDialog):
         input_text_values = {}
         for key, (widget, entry) in self._extra_input_widgets.items():
             if entry.get("type") == "text":
-                input_text_values[key] = widget.text().strip()
+                value = widget.text().strip()
+                if key == "source_profile_id":
+                    # The widget stores fbTools' source-profile ID (see
+                    # _edit_scene_cast_clicked), but SourceProfileLoad's own input is a name
+                    # field -- resolve only here, at the point this becomes the actual
+                    # ComfyUI payload, so the stored ID itself stays intact for re-editing.
+                    value = self._resolve_source_profile_name(value) or value
+                input_text_values[key] = value
             elif entry.get("type") == "choice":
                 input_text_values[key] = widget.currentText().strip()
+            elif entry.get("type") == "bundle":
+                # Not a Project Files id -- an fbTools bundle id, substituted the same
+                # way a plain "text" entry's literal value would be.
+                input_text_values[key] = str(widget.currentData() or "").strip()
             else:
                 input_file_ids[key] = str(widget.currentData() or "").strip()
         return input_file_ids, input_text_values
@@ -649,6 +714,8 @@ class GenerateMediaDialog(QDialog):
                 return
             if entry.get("type") in ("text", "choice"):
                 message = "Enter a value for \"{}\".".format(entry.get("label", entry["key"]))
+            elif entry.get("type") == "bundle":
+                message = "Choose a bundle for \"{}\".".format(entry.get("label", entry["key"]))
             else:
                 message = "Choose a {} for \"{}\" from Project Files.".format(
                     entry.get("type", "file"), entry.get("label", entry["key"]),
@@ -772,12 +839,25 @@ class GenerateMediaDialog(QDialog):
             elif media_type == "audio":
                 icon = QIcon(os.path.join(info.PATH, "images", "AudioThumbnail.svg"))
             combo.addItem(icon, display_name, file_obj.id)
-            combo.setItemData(combo.count() - 1, str(data.get("path", "")), Qt.ToolTipRole)
 
-        if current_id:
-            index = combo.findData(current_id)
-            if index >= 0:
-                combo.setCurrentIndex(index)
+    def _populate_bundle_combo(self, combo):
+        """Populate `combo` with every fbTools Reference Bundle (id -> display name),
+        for a "bundle" extra_inputs entry -- e.g. picking a subject's own voice
+        reference to feed a hand-built template's AUDIO input directly, in place of a
+        Project-Files-backed media combo (there is no bundle concept in Project Files)."""
+        if self.fbtools_client is None:
+            return
+        try:
+            bundles = self.fbtools_client.list_bundles() or []
+        except Exception as ex:
+            log.warning("GenerateMediaDialog: list_bundles failed: %s", ex)
+            return
+        for bundle in bundles:
+            if not isinstance(bundle, dict):
+                continue
+            label = bundle.get("name") or bundle.get("id", "")
+            combo.addItem(str(label), bundle.get("id", ""))
+            combo.setItemData(combo.count() - 1, str(bundle.get("path", "")), Qt.ToolTipRole)
 
     def _choose_tracking_clicked(self):
         if not self.source_file:

@@ -42,6 +42,23 @@ class ParseExtraInputsTests(unittest.TestCase):
             ],
         )
 
+    def test_bundle_type_entry_is_kept(self):
+        """Regression test: the "bundle" extra_inputs type (a Reference Bundle picker,
+        windows/generate.py's _populate_bundle_combo) was added to the Generate dialog's
+        rendering logic without also adding it here -- EXTRA_INPUT_TYPES still only listed
+        the original four types, so any "bundle" entry was silently dropped with a warning,
+        making e.g. the bridge-with-bundle-voice template's voice picker never appear."""
+        payload = {
+            "extra_inputs": [
+                {"key": "bundle_id", "type": "bundle", "label": "Voice Reference", "required": False},
+            ],
+        }
+        result = self.registry._parse_extra_inputs(payload, "some_template.json", needs_reference_image=False)
+        self.assertEqual(
+            result,
+            [{"key": "bundle_id", "type": "bundle", "label": "Voice Reference", "required": False}],
+        )
+
     def test_text_entry_with_string_default_keeps_it(self):
         payload = {
             "extra_inputs": [

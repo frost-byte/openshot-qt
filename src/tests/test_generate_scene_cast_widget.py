@@ -51,12 +51,14 @@ def _scene_cast_template(extra_group_label=None):
     return [{"id": "t1", "name": "Scene Cast Generate", "template": {"extra_inputs": entries}}]
 
 
-def _source_profile_scene_cast_template():
+def _source_profile_scene_cast_template(include_background_override=False):
     entries = [
         {"key": "source_profile_id", "type": "text", "group": "scene_cast", "group_label": "Scene Cast (Source Profile)"},
         {"key": "clip_id", "type": "text", "group": "scene_cast"},
         {"key": "cast_entries_json", "type": "text", "group": "scene_cast", "default": "[]"},
     ]
+    if include_background_override:
+        entries.append({"key": "background_override_id", "type": "text", "group": "scene_cast", "default": ""})
     return [{"id": "t3", "name": "Scene Cast Generate (Source Profile)", "template": {"extra_inputs": entries}}]
 
 
@@ -288,6 +290,8 @@ class SceneCastSourceProfileModeTests(unittest.TestCase):
 
     def test_edit_cast_opens_dialog_in_source_profile_mode_and_writes_back(self):
         dlg = GenerateMediaDialog(templates=_source_profile_scene_cast_template())
+        dlg.fbtools_client = MagicMock()
+        dlg.fbtools_client.list_source_profiles.return_value = [{"id": "team_fort", "name": "Team Fort"}]
         fake_builder = MagicMock()
         fake_builder.exec_.return_value = QDialog.Accepted
         fake_builder.source_profile_id.return_value = "team_fort"
@@ -307,10 +311,48 @@ class SceneCastSourceProfileModeTests(unittest.TestCase):
         profile_widget, _ = dlg._extra_input_widgets["source_profile_id"]
         clip_widget, _ = dlg._extra_input_widgets["clip_id"]
         cast_widget, _ = dlg._extra_input_widgets["cast_entries_json"]
+        # The widget stores the ID, not the resolved name -- re-opening "Edit Cast..." later
+        # matches the builder's combo by ID (see scene_cast_builder.py's findData), and the
+        # summary label (asserted below) is where the resolved name actually shows up.
         self.assertEqual(profile_widget.text(), "team_fort")
         self.assertEqual(clip_widget.text(), "clip_1")
         self.assertEqual(json.loads(cast_widget.text())[0]["source_subject_id"], "s1")
-        self.assertIn("team_fort", dlg.scene_cast_summary_label.text())
+        self.assertIn("Team Fort", dlg.scene_cast_summary_label.text())
+
+    def test_reopening_edit_cast_preselects_the_previously_chosen_profile(self):
+        """Regression test: storing the resolved name (instead of the ID) in the widget
+        broke re-opening "Edit Cast..." -- SceneCastBuilderDialog matches its combo by ID
+        (findData), so a name landing in source_profile_id=... would silently fail to
+        pre-select anything on a second edit."""
+        dlg = GenerateMediaDialog(templates=_source_profile_scene_cast_template())
+        dlg.fbtools_client = MagicMock()
+        dlg.fbtools_client.list_source_profiles.return_value = [{"id": "team_fort", "name": "Team Fort"}]
+        fake_builder = MagicMock()
+        fake_builder.exec_.return_value = QDialog.Accepted
+        fake_builder.source_profile_id.return_value = "team_fort"
+        fake_builder.clip_id.return_value = "clip_1"
+        fake_builder.cast_entries_json.return_value = "[]"
+        with patch.object(generate_module, "SceneCastBuilderDialog", return_value=fake_builder):
+            dlg._edit_scene_cast_clicked()
+
+        with patch.object(generate_module, "SceneCastBuilderDialog", return_value=fake_builder) as ctor:
+            dlg._edit_scene_cast_clicked()
+        _args, kwargs = ctor.call_args
+        self.assertEqual(kwargs["source_profile_id"], "team_fort")
+
+    def test_collect_extra_input_values_resolves_source_profile_id_to_its_name(self):
+        """The actual ComfyUI contract bug this whole chain traced back to: SourceProfileLoad
+        takes a profile NAME, but the builder/widget deal in IDs throughout -- resolution must
+        happen here, at the point this becomes the submitted payload, not earlier."""
+        dlg = GenerateMediaDialog(templates=_source_profile_scene_cast_template())
+        dlg.fbtools_client = MagicMock()
+        dlg.fbtools_client.list_source_profiles.return_value = [{"id": "team_fort", "name": "Team Fort"}]
+        profile_widget, _ = dlg._extra_input_widgets["source_profile_id"]
+        profile_widget.setText("team_fort")
+
+        _input_file_ids, input_text_values = dlg._collect_extra_input_values()
+
+        self.assertEqual(input_text_values["source_profile_id"], "Team Fort")
 
     def test_edit_cast_rejected_leaves_widgets_unchanged(self):
         dlg = GenerateMediaDialog(templates=_source_profile_scene_cast_template())
@@ -324,6 +366,67 @@ class SceneCastSourceProfileModeTests(unittest.TestCase):
 
         self.assertEqual(profile_widget.text(), "original")
         fake_builder.source_profile_id.assert_not_called()
+
+    def test_background_override_widget_absent_when_not_declared(self):
+        dlg = GenerateMediaDialog(templates=_source_profile_scene_cast_template())
+        self.assertNotIn("background_override_id", dlg._extra_input_widgets)
+
+    def test_background_override_widget_created_when_declared(self):
+        dlg = GenerateMediaDialog(templates=_source_profile_scene_cast_template(include_background_override=True))
+        self.assertIn("background_override_id", dlg._extra_input_widgets)
+        widget, _ = dlg._extra_input_widgets["background_override_id"]
+        self.assertFalse(widget.isVisible())
+        self.assertEqual(widget.text(), "")
+
+    def test_edit_cast_passes_background_override_to_dialog_and_writes_back(self):
+        dlg = GenerateMediaDialog(templates=_source_profile_scene_cast_template(include_background_override=True))
+        bg_widget, _ = dlg._extra_input_widgets["background_override_id"]
+        bg_widget.setText("rooftop")
+        fake_builder = MagicMock()
+        fake_builder.exec_.return_value = QDialog.Accepted
+        fake_builder.source_profile_id.return_value = "team_fort"
+        fake_builder.clip_id.return_value = "clip_1"
+        fake_builder.cast_entries_json.return_value = "[]"
+        fake_builder.background_override_id.return_value = "none"
+
+        with patch.object(generate_module, "SceneCastBuilderDialog", return_value=fake_builder) as ctor:
+            dlg._edit_scene_cast_clicked()
+
+        _args, kwargs = ctor.call_args
+        self.assertEqual(kwargs["background_override_id"], "rooftop")
+        self.assertEqual(bg_widget.text(), "none")
+
+    def test_edit_cast_rejected_leaves_background_override_unchanged(self):
+        dlg = GenerateMediaDialog(templates=_source_profile_scene_cast_template(include_background_override=True))
+        bg_widget, _ = dlg._extra_input_widgets["background_override_id"]
+        bg_widget.setText("rooftop")
+        fake_builder = MagicMock()
+        fake_builder.exec_.return_value = QDialog.Rejected
+
+        with patch.object(generate_module, "SceneCastBuilderDialog", return_value=fake_builder):
+            dlg._edit_scene_cast_clicked()
+
+        self.assertEqual(bg_widget.text(), "rooftop")
+        fake_builder.background_override_id.assert_not_called()
+
+    def test_summary_shows_background_override_id(self):
+        dlg = GenerateMediaDialog(templates=_source_profile_scene_cast_template(include_background_override=True))
+        bg_widget, _ = dlg._extra_input_widgets["background_override_id"]
+        bg_widget.setText("rooftop")
+        dlg._refresh_scene_cast_summary()
+        self.assertIn("Background: rooftop", dlg.scene_cast_summary_label.text())
+
+    def test_summary_shows_none_background_override(self):
+        dlg = GenerateMediaDialog(templates=_source_profile_scene_cast_template(include_background_override=True))
+        bg_widget, _ = dlg._extra_input_widgets["background_override_id"]
+        bg_widget.setText("none")
+        dlg._refresh_scene_cast_summary()
+        self.assertIn("Background: (none)", dlg.scene_cast_summary_label.text())
+
+    def test_summary_omits_background_line_when_default(self):
+        dlg = GenerateMediaDialog(templates=_source_profile_scene_cast_template(include_background_override=True))
+        dlg._refresh_scene_cast_summary()
+        self.assertNotIn("Background:", dlg.scene_cast_summary_label.text())
 
     def test_missing_input_message_points_at_edit_cast_for_source_profile_mode_too(self):
         dlg = GenerateMediaDialog(templates=_source_profile_scene_cast_template())
