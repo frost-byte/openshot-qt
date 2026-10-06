@@ -59,7 +59,8 @@ class TrackPainter(BasePainter):
         self.name_top_overlay2 = QColor(self.w.theme.track.name_top_overlay2)
         self.menu_pix = None
         from windows.views.timeline_backend.theme import _icon as _theme_icon
-        arrow = _theme_icon("themes/cosmic/images/dropdown-arrow.svg")
+        arrow = (getattr(self.w.theme.track, "menu_icon", None)
+                 or _theme_icon("themes/cosmic/images/dropdown-arrow.svg"))
         self.dropdown_arrow_pix = arrow if (arrow and not arrow.isNull()) else None
         self.menu_margin = self.w.theme.menu_margin
         self.toggle_off_pix = None
@@ -71,7 +72,9 @@ class TrackPainter(BasePainter):
                 return None
             width = float(pixmap.width())
             height = float(pixmap.height())
-            if toggle_size > 0.0:
+            if self.w.theme.compact_track_headers:
+                width = height = self.w.theme.track_control_size
+            elif toggle_size > 0.0:
                 target = max(toggle_size, width, height)
                 width = height = target
             return self.scaled_pixmap(pixmap, width, height)
@@ -138,6 +141,10 @@ class TrackPainter(BasePainter):
         if name_rect.isNull() or name_rect.width() <= 0.0 or name_rect.height() <= 0.0:
             return QRectF(), None, QRectF(), ""
 
+        compact = getattr(self.w.theme, "compact_track_headers", False)
+        if compact:
+            name_rect = QRectF(name_rect)
+            name_rect.setHeight(min(name_rect.height(), self.w.theme.track.height))
         metrics = QFontMetrics(painter.font()) if painter is not None else None
         font_h = float(metrics.height()) if metrics is not None else max(12.0, name_rect.height() - 4.0)
         pad_x = 6.0
@@ -147,6 +154,11 @@ class TrackPainter(BasePainter):
         border_top = float(self.name_border_top_width or 0.0)
         border_bottom = float(self.name_border_bottom_width or 0.0)
         available_w = max(0.0, name_rect.width() - border_left)
+        if compact and track is not None:
+            buttons = self.w._track_toolbar_buttons(track, name_rect)
+            if buttons:
+                available_w = max(0.0, min(b["rect"].left() for b in buttons)
+                                  - name_rect.x() - border_left - 2.0)
         available_h = max(1.0, name_rect.height() - border_top - border_bottom)
         container_h = min(available_h, font_h + pad_y * 2.0)
         icon_size = max(8.0, font_h - 2.0)
@@ -168,7 +180,8 @@ class TrackPainter(BasePainter):
         container_w = max(container_h, container_w)
         container_rect = QRectF(
             name_rect.x() + border_left,
-            name_rect.y() + border_top,
+            (name_rect.y() + (name_rect.height() - container_h) / 2.0
+             if compact else name_rect.y() + border_top),
             container_w,
             max(1.0, container_h),
         )
@@ -223,6 +236,12 @@ class TrackPainter(BasePainter):
         painter.save()
         painter.setClipRect(area)
         banding_cfg = self._frame_banding_config()
+        active_track_id = getattr(self.w.window, "active_insertion_track_id", None)
+        if active_track_id is None:
+            resolver = getattr(self.w.window, "active_insertion_track_number", None)
+            if callable(resolver):
+                resolver()
+                active_track_id = getattr(self.w.window, "active_insertion_track_id", None)
         for track_rect, track, _name_rect in self.w.geometry.iter_tracks():
             vis = track_rect.intersected(area)
             if vis.isNull():
@@ -255,11 +274,22 @@ class TrackPainter(BasePainter):
             painter.drawLine(vis.topLeft(), vis.topRight())
             painter.drawLine(vis.bottomLeft(), vis.bottomRight())
             painter.drawLine(vis.topRight(), vis.bottomRight())
+            if track.id == active_track_id and not _name_rect.isNull():
+                painter.save()
+                painter.setClipping(False)
+                painter.setClipRect(QRectF(0, 0, self.w.track_name_width, self.w.height()))
+                indicator_pen = QPen(QColor("#FFD700"))
+                indicator_pen.setWidth(3)
+                indicator_pen.setCosmetic(True)
+                painter.setPen(indicator_pen)
+                painter.drawLine(_name_rect.bottomLeft(), _name_rect.bottomRight())
+                painter.restore()
 
-        painter.fillRect(
-            self.w.resize_handle_rect.intersected(area),
-            self.w.theme.track.border_color,
-        )
+        if not self.w.theme.track.name_border_right_width:
+            painter.fillRect(
+                self.w.resize_handle_rect.intersected(area),
+                self.w.theme.track.border_color,
+            )
         timeline_handle = self.w.geometry.timeline_handle_rect()
         if timeline_handle and not timeline_handle.isNull():
             handle_rect = timeline_handle.intersected(area)
@@ -272,6 +302,21 @@ class TrackPainter(BasePainter):
                     accent.setAlpha(180)
                     painter.fillRect(inner, accent)
         painter.restore()
+
+    def paint_divider(self, painter: QPainter):
+        """Keep the name-column edge visible above expanded keyframe panels."""
+        theme = self.w.theme.track
+        width = theme.name_border_right_width
+        if width <= 0 or not theme.name_border_right_color.isValid():
+            return
+        top = self.w.ruler_height + self.w.track_margin_top
+        rect = QRectF(
+            self.w.track_name_width - width,
+            top,
+            width,
+            max(0.0, self.w.height() - self.w.scroll_bar_thickness - top),
+        )
+        painter.fillRect(rect, theme.name_border_right_color)
 
     def _frame_banding_config(self):
         pps = float(getattr(self.w, "pixels_per_second", 0.0) or 0.0)
@@ -366,10 +411,20 @@ class TrackPainter(BasePainter):
         self.w._track_title_rects = []
         original_font = painter.font()
         track_font = QFont(original_font)
+        scale = getattr(self.w.theme, "label_font_scale", 1.0)
         if track_font.pixelSize() > 0:
-            track_font.setPixelSize(track_font.pixelSize() + 1)
+            track_font.setPixelSize(max(1, round((track_font.pixelSize() + 1) * scale)))
         elif track_font.pointSizeF() > 0:
-            track_font.setPointSizeF(track_font.pointSizeF() + 1.0)
+            track_font.setPointSizeF((track_font.pointSizeF() + 1.0) * scale)
+        if getattr(self.w.theme, "compact_track_headers", False):
+            max_height = max(8.0, self.w.theme.track.height - 6.0)
+            font_height = QFontMetrics(track_font).height()
+            if font_height > max_height:
+                factor = max_height / font_height
+                if track_font.pixelSize() > 0:
+                    track_font.setPixelSize(max(1, int(track_font.pixelSize() * factor)))
+                else:
+                    track_font.setPointSizeF(max(1.0, track_font.pointSizeF() * factor))
         painter.setFont(track_font)
         for _track_rect, track, name_rect in self.w.geometry.iter_tracks():
             locked = bool((track.data if isinstance(track.data, dict) else {}).get("lock"))
@@ -505,7 +560,7 @@ class TrackPainter(BasePainter):
                     {
                         "rect": QRectF(title_rect),
                         "track": track,
-                        "title": str(title_elided or self.w._track_display_label(track) or ""),
+                        "title": str(self.w._track_display_label(track) or ""),
                         "open_menu": True,
                     }
                 )

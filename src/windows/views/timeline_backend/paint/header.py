@@ -56,9 +56,24 @@ class ItemHeaderMixin:
         icons = []
         painter.save()
         painter.setClipRect(visible, Qt.IntersectClip)
-        # Match the default font of the former QImage cache painter rather than
-        # inheriting the timeline widget's stylesheet font and resizing badges.
-        painter.setFont(QFont())
+        # Start from the application font, as the former QImage cache did.
+        # Theme scaling keeps labels proportional without changing the ruler.
+        font = QFont()
+        scale = getattr(getattr(self.w, "theme", None), "label_font_scale", 1.0)
+        if font.pixelSize() > 0:
+            font.setPixelSize(max(1, round(font.pixelSize() * scale)))
+        elif font.pointSizeF() > 0:
+            font.setPointSizeF(font.pointSizeF() * scale)
+        if getattr(getattr(self.w, "theme", None), "compact_track_headers", False):
+            max_height = max(8.0, inner.height() - 4.0)
+            font_height = QFontMetrics(font).height()
+            if font_height > max_height:
+                factor = max_height / font_height
+                if font.pixelSize() > 0:
+                    font.setPixelSize(max(1, int(font.pixelSize() * factor)))
+                else:
+                    font.setPointSizeF(max(1.0, font.pointSizeF() * factor))
+        painter.setFont(font)
         text = self._draw_item_text(
             painter, item, header, header.left(), header.right(),
             visible_width=header.width(), icon_entries=icons,

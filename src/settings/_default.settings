@@ -129,6 +129,31 @@
     "setting": "emoji_group_filter"
   },
   {
+    "value": "default",
+    "title": "Track Size",
+    "type": "dropdown",
+    "restart": false,
+    "category": "Timeline",
+    "setting": "timeline-track-size",
+    "translate_values": true,
+    "values": [
+      {"value": "minimal", "name": "Minimal"},
+      {"value": "compact", "name": "Compact"},
+      {"value": "default", "name": "Default"},
+      {"value": "relaxed", "name": "Relaxed"}
+    ]
+  },
+  {
+    "value": 5,
+    "title": "Default Number of Tracks",
+    "type": "spinner-int",
+    "restart": false,
+    "category": "Timeline",
+    "setting": "default-track-count",
+    "min": 1,
+    "max": 100
+  },
+  {
     "value": "entire",
     "title": "Thumbnail Style",
     "type": "dropdown",
@@ -878,6 +903,14 @@
     "restart": false,
     "setting": "actionAdd_to_Timeline",
     "value": "Ctrl+Alt+A",
+    "type": "text"
+  },
+  {
+    "category": "Keyboard",
+    "title": "Insert at Playhead (Ripple)",
+    "restart": false,
+    "setting": "actionInsertSelectedFiles",
+    "value": "V",
     "type": "text"
   },
   {

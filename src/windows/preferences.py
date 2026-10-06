@@ -36,16 +36,18 @@ from qt_api import (
     QWidget, QDialog, QMessageBox, QFileDialog, QDialogButtonBox,
     QVBoxLayout, QHBoxLayout, QSizePolicy,
     QScrollArea, QLabel, QLineEdit, QPushButton,
-    QDoubleSpinBox, QComboBox, QCheckBox, QSpinBox, QStyle,
+    QDoubleSpinBox, QComboBox, QSpinBox, QStyle,
 )
 from qt_api import QKeySequence, QIcon
 
 from classes import info, ui_util, tabstops
 from classes import openshot_rc  # noqa
 from classes.app import get_app
+from classes.distribution import is_snap
 from classes.language import get_all_languages
 from classes.logger import log
 from classes.metrics import track_metric_screen
+from windows.toggle_switch import ToggleSwitch
 
 import openshot
 
@@ -250,7 +252,13 @@ class Preferences(QDialog):
                 label.setText(_(param["title"]))
                 label.setToolTip(_(param["title"]))
 
-                if param["type"] == "spinner":
+                if is_snap() and param.get("setting") in ("blender_command", "title_editor"):
+                    message = (_("Not available in Snap") if param["setting"] == "blender_command"
+                               else _("No path needed in Snap"))
+                    widget = QLabel(message)
+                    widget.setEnabled(False)
+
+                elif param["type"] == "spinner":
                     # create QDoubleSpinBox
                     widget = QDoubleSpinBox()
                     widget.setMinimum(float(param["min"]))
@@ -260,7 +268,7 @@ class Preferences(QDialog):
                     widget.setToolTip(param["title"])
                     widget.valueChanged.connect(functools.partial(self.spinner_value_changed, param))
 
-                if param["type"] == "spinner-int":
+                elif param["type"] == "spinner-int":
                     # create QDoubleSpinBox
                     widget = QSpinBox()
                     min_value = int(param["min"])
@@ -301,9 +309,9 @@ class Preferences(QDialog):
                         )
 
                 elif param["type"] == "bool":
-                    # create spinner
-                    widget = QCheckBox()
-                    widget.setMinimumHeight(24)
+                    widget = ToggleSwitch()
+                    widget.setAccessibleName(_(param["title"]))
+                    label.setBuddy(widget)
                     if param["value"] is True:
                         widget.setCheckState(Qt.Checked)
                     else:
@@ -488,6 +496,8 @@ class Preferences(QDialog):
                 if (widget and label and filterFound):
                     # Add minimum size
                     label.setMinimumWidth(180)
+                    # Match combo-box rows, including text-only values.
+                    label.setMinimumHeight(28)
                     label.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
                     widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
 
@@ -637,6 +647,12 @@ class Preferences(QDialog):
         """Check if the app needs to restart"""
         if "restart" in param and param["restart"]:
             self.requires_restart = True
+
+    def _apply_timeline_track_size(self):
+        """Resize timeline tracks immediately when the preference changes."""
+        timeline_widget = getattr(get_app().window, "timeline", None)
+        if hasattr(timeline_widget, "set_track_size"):
+            timeline_widget.set_track_size(self.s.get("timeline-track-size"))
 
     def _apply_timeline_thumbnail_style(self):
         """Push the current thumbnail preference to the QWidget timeline."""
@@ -916,6 +932,8 @@ class Preferences(QDialog):
 
         if param["setting"] == "timeline-thumbnail-style":
             self._apply_timeline_thumbnail_style()
+        if param["setting"] == "timeline-track-size":
+            self._apply_timeline_track_size()
 
         # Check for restart
         self.check_for_restart(param)
@@ -1051,6 +1069,8 @@ class Preferences(QDialog):
                 self._apply_cache_settings()
             elif category == "Cache":
                 self._apply_cache_settings()
+            elif category == "Timeline":
+                self._apply_timeline_track_size()
 
             # Re-apply thumbnail style to the QWidget timeline if it changed
             self._apply_timeline_thumbnail_style()
