@@ -1232,14 +1232,11 @@ class GenerationService(QObject):
 
         declared_inputs = {entry.get("key"): entry for entry in template_meta.get("extra_inputs", [])}
         extra_input_paths = {}
-        extra_input_texts = {}
+        extra_input_texts, text_error = self._collect_text_extra_inputs(declared_inputs, input_text_values)
+        if text_error:
+            return False, text_error
         for key, entry in declared_inputs.items():
-            if entry.get("type") in ("text", "choice"):
-                value = str(input_text_values.get(key, "") or "").strip()
-                if not value and entry.get("required", True):
-                    return False, "Enter a value for \"{}\".".format(entry.get("label", key))
-                if value:
-                    extra_input_texts[key] = value
+            if entry.get("type") in self._TEXT_EXTRA_INPUT_TYPES:
                 continue
 
             file_id = str(input_file_ids.get(key, "") or "").strip()
@@ -1326,6 +1323,34 @@ class GenerationService(QObject):
             entry.get("key") for entry in extra_inputs
             if isinstance(entry, dict) and entry.get("type") == "video" and entry.get("key")
         ]
+
+    # extra_inputs types whose value is a plain string substituted into the workflow (as opposed
+    # to a Project Files id that becomes a path). "bundle" is an fbTools Reference Bundle id.
+    _TEXT_EXTRA_INPUT_TYPES = ("text", "choice", "bundle")
+
+    @classmethod
+    def _collect_text_extra_inputs(cls, declared_inputs, input_text_values):
+        """Return (extra_input_texts, error) for every text-valued declared extra input.
+
+        A required input left blank is an error. An optional input left blank is substituted
+        as an empty string rather than skipped: skipping would leave the literal
+        ``__openshot_input:<key>__`` placeholder in the workflow, which ComfyUI then rejects
+        (e.g. a combo that does not list it) or hands to a node as if it were real text.
+        """
+        texts = {}
+        for key, entry in declared_inputs.items():
+            if entry.get("type") not in cls._TEXT_EXTRA_INPUT_TYPES:
+                continue
+            value = str(input_text_values.get(key, "") or "").strip()
+            if value:
+                texts[key] = value
+            elif entry.get("required", True):
+                if entry.get("type") == "bundle":
+                    return {}, "Choose a bundle for \"{}\".".format(entry.get("label", key))
+                return {}, "Enter a value for \"{}\".".format(entry.get("label", key))
+            else:
+                texts[key] = ""
+        return texts, None
 
     @classmethod
     def _qualifies_as_bridge_template(cls, template_entry):

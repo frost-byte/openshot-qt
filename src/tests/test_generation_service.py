@@ -1071,6 +1071,71 @@ class GenerationServiceTests(unittest.TestCase):
 
         mock_box.warning.assert_called_once()
 
+    # ---- text-valued extra inputs (text / choice / bundle) ----
+
+    def test_collect_text_extra_inputs_carries_a_selected_bundle(self):
+        declared = {"bundle_id": {"key": "bundle_id", "type": "bundle", "required": False}}
+        texts, error = GenerationService._collect_text_extra_inputs(declared, {"bundle_id": " alice_voice "})
+        self.assertIsNone(error)
+        self.assertEqual(texts, {"bundle_id": "alice_voice"})
+
+    def test_collect_text_extra_inputs_substitutes_empty_string_for_unset_optional_bundle(self):
+        # The picker's "(none)" submits "" -- it must still be substituted, or the literal
+        # __openshot_input:bundle_id__ placeholder reaches ComfyUI and fails combo validation.
+        declared = {"bundle_id": {"key": "bundle_id", "type": "bundle", "required": False}}
+        texts, error = GenerationService._collect_text_extra_inputs(declared, {"bundle_id": ""})
+        self.assertIsNone(error)
+        self.assertEqual(texts, {"bundle_id": ""})
+
+    def test_collect_text_extra_inputs_substitutes_empty_string_for_missing_optional_value(self):
+        declared = {"note": {"key": "note", "type": "text", "required": False}}
+        texts, error = GenerationService._collect_text_extra_inputs(declared, {})
+        self.assertIsNone(error)
+        self.assertEqual(texts, {"note": ""})
+
+    def test_collect_text_extra_inputs_required_bundle_blank_asks_for_a_bundle(self):
+        declared = {"bundle_id": {"key": "bundle_id", "type": "bundle", "label": "Voice", "required": True}}
+        texts, error = GenerationService._collect_text_extra_inputs(declared, {"bundle_id": ""})
+        self.assertEqual(texts, {})
+        self.assertIn("Choose a bundle", error)
+        self.assertIn("Voice", error)
+
+    def test_collect_text_extra_inputs_required_text_blank_asks_for_a_value(self):
+        declared = {"note": {"key": "note", "type": "text", "label": "Scene detail"}}
+        _texts, error = GenerationService._collect_text_extra_inputs(declared, {"note": "  "})
+        self.assertIn("Enter a value", error)
+        self.assertIn("Scene detail", error)
+
+    def test_collect_text_extra_inputs_ignores_media_types(self):
+        declared = {
+            "clip_b": {"key": "clip_b", "type": "video", "required": True},
+            "ref": {"key": "ref", "type": "image", "required": False},
+        }
+        texts, error = GenerationService._collect_text_extra_inputs(declared, {})
+        self.assertIsNone(error)
+        self.assertEqual(texts, {})
+
+    def test_prepare_template_workflow_substitutes_bundle_id_and_leaves_no_placeholder(self):
+        workflow_fixture = {
+            "1": {"class_type": "BundleLoad", "inputs": {"bundle_id": "__openshot_input:bundle_id__"}},
+        }
+        service = GenerationService.__new__(GenerationService)
+        service.template_registry = types.SimpleNamespace(
+            get_workflow_copy=lambda template_id: copy.deepcopy(workflow_fixture),
+        )
+        for chosen, expected in (("alice_voice", "alice_voice"), ("", "")):
+            workflow, bindings = service._prepare_template_workflow(
+                template={"id": "t1", "path": ""},
+                payload_name="test_gen",
+                prompt_text="",
+                source_file=None,
+                source_path="",
+                extra_input_texts={"bundle_id": chosen},
+            )
+            self.assertEqual(workflow["1"]["inputs"]["bundle_id"], expected)
+            self.assertNotIn("__openshot_input", str(workflow))
+            self.assertEqual(bindings, [])
+
 
 if __name__ == "__main__":
     unittest.main()
