@@ -1685,6 +1685,10 @@ class MainWindow(updates.UpdateWatcher, QMainWindow):
         props_dock = getattr(self, "dockProperties", None)
         if not props_dock:
             return
+        timeline = getattr(self, "timeline", None)
+        capture = getattr(timeline, "begin_properties_layout_change", None)
+        if capture:
+            capture()
 
         needs_anchor = (
             props_dock.isFloating()
@@ -2943,8 +2947,11 @@ class MainWindow(updates.UpdateWatcher, QMainWindow):
             return
         self.slice_clips(MenuSlice.KEEP_RIGHT, selected_only=True, ripple=True)
 
-    def actionProperties_trigger(self):
+    def actionProperties_trigger(self, checked=False, timeline_anchor=None):
         log.debug('actionProperties_trigger')
+        capture = getattr(self.timeline, "begin_properties_layout_change", None)
+        if capture:
+            capture(timeline_anchor)
 
         # Show properties dock
         if (not self.dockProperties.isVisible()
@@ -5075,6 +5082,12 @@ class MainWindow(updates.UpdateWatcher, QMainWindow):
     def eventFilter(self, obj, event):
         """Filter out specific QActions/QShortcuts when certain docks have focus."""
 
+        if (obj is getattr(self, "dockProperties", None)
+                and event.type() in (QEvent.Show, QEvent.Hide, QEvent.Move, QEvent.Resize)):
+            capture = getattr(getattr(self, "timeline", None), "begin_properties_layout_change", None)
+            if capture:
+                capture()
+
         if (isinstance(obj, QTabBar)
                 and event.type() == QEvent.MouseButtonRelease
                 and isinstance(event, QMouseEvent)
@@ -5103,6 +5116,13 @@ class MainWindow(updates.UpdateWatcher, QMainWindow):
         # Check if event type is a shortcut override (keyboard shortcut triggered)
         if event.type() == QEvent.ShortcutOverride:
             focused_widget = self.focusWidget()
+            timeline = getattr(self, "timeline", None)
+            if (focused_widget is timeline or
+                    (timeline and focused_widget and callable(getattr(timeline, "isAncestorOf", None))
+                     and timeline.isAncestorOf(focused_widget))):
+                release_anchor = getattr(timeline, "end_properties_layout_change", None)
+                if release_anchor:
+                    release_anchor()
             if self._blocks_timeline_shortcuts(focused_widget):
                 for action_name in ignored_actions:
                     try:
@@ -5805,6 +5825,7 @@ class MainWindow(updates.UpdateWatcher, QMainWindow):
         for _dock in [self.dockLumaWaveform, self.dockHistogram, self.dockVectorscope]:
             _dock.visibilityChanged.connect(self._on_video_scope_visibility_changed)
         self.dockProperties.toggleViewAction().triggered.connect(self._on_properties_dock_toggled)
+        self.dockProperties.installEventFilter(self)
         self.dockAudioRecording.visibilityChanged.connect(self._on_audio_recording_visibility_changed)
         if self.dockAudioRecording.isVisible():
             self._ensure_audio_recording_dock_content()
