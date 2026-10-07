@@ -93,6 +93,16 @@ class BuildCastEntriesJsonTests(unittest.TestCase):
     def test_empty_assignments_yields_empty_array(self):
         self.assertEqual(scb.build_cast_entries_json([]), "[]")
 
+    def test_use_audio_true_is_included_and_false_is_omitted(self):
+        result = json.loads(scb.build_cast_entries_json([
+            {"subject_id": "alex", "bundle_id": "alex_bundle", "use_audio": True},
+            {"subject_id": "sam", "bundle_id": "sam_bundle", "use_audio": False},
+        ]))
+        self.assertEqual(result, [
+            {"subject_id": "alex", "bundle_id": "alex_bundle", "use_audio": True},
+            {"subject_id": "sam", "bundle_id": "sam_bundle"},
+        ])
+
 
 class BuildOverridesJsonTests(unittest.TestCase):
     def test_default_sentinel_omits_background_key(self):
@@ -194,6 +204,16 @@ class BuildSourceProfileCastEntriesJsonTests(unittest.TestCase):
             "source_profile_id": "team_fort", "source_subject_id": "s2",
         }])
 
+    def test_use_audio_true_is_included_and_false_is_omitted(self):
+        result = json.loads(scb.build_source_profile_cast_entries_json([
+            {"subject_id": "alex", "bundle_id": "alex_casual", "source_profile_id": "team_fort",
+             "source_subject_id": "s1", "use_audio": True},
+            {"subject_id": "sam", "bundle_id": "sam_casual", "source_profile_id": "team_fort",
+             "source_subject_id": "s2", "use_audio": False},
+        ]))
+        self.assertEqual([("use_audio" in e) for e in result], [True, False])
+        self.assertTrue(result[0]["use_audio"])
+
     def test_missing_subject_id_skips_row(self):
         # subject_id comes from the chosen bundle's own subject_id -- an unresolvable bundle
         # (shouldn't happen via the dialog, but defensively) must not emit a broken entry.
@@ -273,6 +293,52 @@ class SceneCastBuilderDialogTests(unittest.TestCase):
             json.loads(dlg.cast_entries_json()),
             [{"subject_id": "alex", "bundle_id": "alex_casual", "primary": True}],
         )
+
+    def _audio_dialog(self, initial_entries=None):
+        client = _fake_client(
+            compositions=[{"id": "wide_shot", "name": "Wide Shot"}],
+            bundles=[{"id": "alex_casual", "subject_id": "alex", "name": "Casual"}],
+            composition_by_id={"wide_shot": {"id": "wide_shot", "subjects": {"A": "alex"}}},
+        )
+        return scb.SceneCastBuilderDialog(
+            fbtools_client=client, composition_name="wide_shot",
+            cast_entries_json=json.dumps(initial_entries) if initial_entries is not None else "[]",
+        )
+
+    def test_audio_checkbox_is_disabled_until_a_bundle_is_chosen(self):
+        dlg = self._audio_dialog()
+        slot = dlg._slot_widgets["A"]
+        self.assertFalse(slot["audio_check"].isEnabled())
+        slot["bundle_combo"].setCurrentIndex(slot["bundle_combo"].findData("alex_casual"))
+        self.assertTrue(slot["audio_check"].isEnabled())
+
+    def test_audio_checkbox_writes_use_audio_into_the_entry(self):
+        dlg = self._audio_dialog()
+        slot = dlg._slot_widgets["A"]
+        slot["bundle_combo"].setCurrentIndex(slot["bundle_combo"].findData("alex_casual"))
+        self.assertEqual(json.loads(dlg.cast_entries_json()), [{"subject_id": "alex", "bundle_id": "alex_casual"}])
+        slot["audio_check"].setChecked(True)
+        self.assertEqual(
+            json.loads(dlg.cast_entries_json()),
+            [{"subject_id": "alex", "bundle_id": "alex_casual", "use_audio": True}],
+        )
+
+    def test_audio_checkbox_is_cleared_when_the_bundle_is_unselected(self):
+        dlg = self._audio_dialog()
+        slot = dlg._slot_widgets["A"]
+        slot["bundle_combo"].setCurrentIndex(slot["bundle_combo"].findData("alex_casual"))
+        slot["audio_check"].setChecked(True)
+        slot["bundle_combo"].setCurrentIndex(0)   # back to "(use Composition default)"
+        self.assertFalse(slot["audio_check"].isEnabled())
+        self.assertFalse(slot["audio_check"].isChecked())
+        self.assertEqual(dlg.cast_entries_json(), "[]")
+
+    def test_initial_use_audio_is_restored_when_the_dialog_reopens(self):
+        dlg = self._audio_dialog([{"subject_id": "alex", "bundle_id": "alex_casual", "use_audio": True}])
+        slot = dlg._slot_widgets["A"]
+        self.assertTrue(slot["audio_check"].isEnabled())
+        self.assertTrue(slot["audio_check"].isChecked())
+        self.assertEqual(json.loads(dlg.cast_entries_json())[0].get("use_audio"), True)
 
     def test_initial_overrides_preselect_background(self):
         client = _fake_client(
@@ -408,6 +474,31 @@ class SceneCastBuilderDialogSourceProfileModeTests(unittest.TestCase):
             [{
                 "subject_id": "alex", "bundle_id": "alex_casual",
                 "source_profile_id": "team_fort", "source_subject_id": "s1", "primary": True,
+            }],
+        )
+
+    def test_audio_checkbox_writes_use_audio_into_source_profile_entries(self):
+        client = _fake_source_profile_client(
+            profiles=[{"id": "team_fort", "name": "Team Fort"}],
+            bundles=[{"id": "alex_casual", "subject_id": "alex", "name": "Casual"}],
+            profile_by_id={"team_fort": {
+                "id": "team_fort",
+                "subjects": [{"id": "s1", "label": "Rora"}],
+                "clips": [{"id": "clip_1", "label": "Intro", "subjects": ["s1"]}],
+            }},
+        )
+        dlg = scb.SceneCastBuilderDialog(fbtools_client=client, mode="source_profile")
+        dlg.source_profile_combo.setCurrentIndex(dlg.source_profile_combo.findData("team_fort"))
+        dlg.clip_combo.setCurrentIndex(dlg.clip_combo.findData("clip_1"))
+        slot = dlg._slot_widgets["s1"]
+        self.assertFalse(slot["audio_check"].isEnabled())
+        slot["bundle_combo"].setCurrentIndex(slot["bundle_combo"].findData("alex_casual"))
+        slot["audio_check"].setChecked(True)
+        self.assertEqual(
+            json.loads(dlg.cast_entries_json()),
+            [{
+                "subject_id": "alex", "bundle_id": "alex_casual",
+                "source_profile_id": "team_fort", "source_subject_id": "s1", "use_audio": True,
             }],
         )
 

@@ -7,7 +7,7 @@ instead of extracting audio from the footage itself."""
 import sys
 import unittest
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 SOURCE_ROOT = str(Path(__file__).resolve().parents[1])
 if SOURCE_ROOT not in sys.path:
@@ -110,6 +110,27 @@ class BundleInputTests(unittest.TestCase):
         client = _fake_client(bundles=[{"id": "rora_k_lech", "name": "Rora (K-Lech)"}])
         dlg = GenerateMediaDialog(templates=_bundle_template(required=False), fbtools_client=client)
         self.assertIsNone(dlg._first_missing_required_input())
+
+    def test_image_extra_input_chooser_updates_combo(self):
+        templates = [{"id": "t1", "name": "Overlay", "template": {"extra_inputs": [
+            {"key": "overlay_image", "type": "image", "label": "Overlay Image", "required": True},
+        ]}}]
+        dlg = GenerateMediaDialog(templates=templates)
+        widget, _ = dlg._extra_input_widgets["overlay_image"]
+        self.assertEqual(widget.count(), 1)
+
+        fake_file = MagicMock()
+        fake_file.id = "img-123"
+        fake_file.data = {"media_type": "image", "name": "overlay.png", "path": "/tmp/overlay.png"}
+
+        app = MagicMock()
+        with patch("windows.generate.QFileDialog.getOpenFileName", return_value=("/tmp/overlay.png", "Images")), \
+             patch("windows.generate.get_app", return_value=app), \
+             patch("windows.generate.File.get", return_value=fake_file):
+            dlg._choose_media_from_project_files(widget, "Overlay Image", "image")
+
+            app.window.files_model.add_files.assert_called_once_with("/tmp/overlay.png", prevent_image_seq=True)
+        self.assertEqual(widget.currentData(), "img-123")
 
 
 if __name__ == "__main__":

@@ -134,8 +134,9 @@ def parse_overrides_json(text):
 
 
 def build_cast_entries_json(slot_assignments):
-    """slot_assignments: [{"subject_id", "bundle_id", "primary"}, ...] (already filtered to
-    slots where a bundle was actually chosen) -> the cast_entries_json string. Matches
+    """slot_assignments: [{"subject_id", "bundle_id", "primary", "use_audio"}, ...] (already
+    filtered to slots where a bundle was actually chosen; "use_audio" = include that bundle's own
+    audio as a reference) -> the cast_entries_json string. Matches
     fbTools' SceneCastBuild bundle-only entry shape exactly (nodes/scene_casts.py::execute)."""
     entries = []
     for assignment in slot_assignments:
@@ -146,6 +147,8 @@ def build_cast_entries_json(slot_assignments):
         entry = {"subject_id": subject_id, "bundle_id": bundle_id}
         if assignment.get("primary"):
             entry["primary"] = True
+        if assignment.get("use_audio"):
+            entry["use_audio"] = True
         entries.append(entry)
     return json.dumps(entries)
 
@@ -203,6 +206,8 @@ def build_source_profile_cast_entries_json(slot_assignments):
         }
         if assignment.get("primary"):
             entry["primary"] = True
+        if assignment.get("use_audio"):
+            entry["use_audio"] = True
         entries.append(entry)
     return json.dumps(entries)
 
@@ -490,6 +495,26 @@ class SceneCastBuilderDialog(QDialog):
         else:
             self._rebuild_composition_slot_rows()
 
+    def _make_audio_check(self, bundle_combo):
+        """The per-slot "Audio" checkbox: include the chosen bundle's own audio (its voice
+        sample) as a reference for this slot. It means nothing without a bundle, so it is only
+        enabled -- and only stays checked -- while a bundle is chosen."""
+        audio_check = QCheckBox("Audio")
+        audio_check.setToolTip(
+            "Include this bundle's own audio (its voice sample) as a reference.\n"
+            "For a Source Profile clip, the clip segment must also allow dialogue."
+        )
+
+        def _sync(_index=0, combo=bundle_combo, check=audio_check):
+            has_bundle = bool(str(combo.currentData() or "").strip())
+            check.setEnabled(has_bundle)
+            if not has_bundle:
+                check.setChecked(False)
+
+        bundle_combo.currentIndexChanged.connect(_sync)
+        _sync()
+        return audio_check
+
     def _rebuild_composition_slot_rows(self):
         initial_by_subject = {
             str(entry.get("subject_id", "")): entry
@@ -505,6 +530,7 @@ class SceneCastBuilderDialog(QDialog):
 
             primary_radio = QRadioButton("Primary")
             self._primary_group.addButton(primary_radio)
+            audio_check = self._make_audio_check(bundle_combo)
 
             initial_entry = initial_by_subject.get(subject_id)
             if initial_entry:
@@ -512,11 +538,13 @@ class SceneCastBuilderDialog(QDialog):
                 if bundle_index >= 0:
                     bundle_combo.setCurrentIndex(bundle_index)
                 primary_radio.setChecked(bool(initial_entry.get("primary")))
+                audio_check.setChecked(bool(initial_entry.get("use_audio")))
 
             row = QWidget(self)
             row_layout = QHBoxLayout(row)
             row_layout.setContentsMargins(0, 0, 0, 0)
             row_layout.addWidget(bundle_combo, 1)
+            row_layout.addWidget(audio_check, 0)
             row_layout.addWidget(primary_radio, 0)
             self.slots_form.addRow("Slot {}".format(slot_letter), row)
 
@@ -524,6 +552,7 @@ class SceneCastBuilderDialog(QDialog):
                 "subject_id": subject_id,
                 "bundle_combo": bundle_combo,
                 "primary_radio": primary_radio,
+                "audio_check": audio_check,
             }
 
         self._apply_initial_overrides_once()
@@ -696,6 +725,7 @@ class SceneCastBuilderDialog(QDialog):
 
             primary_radio = QRadioButton("Primary")
             self._primary_group.addButton(primary_radio)
+            audio_check = self._make_audio_check(bundle_combo)
 
             initial_entry = initial_by_source_subject.get(source_subject_id)
             if initial_entry:
@@ -703,11 +733,13 @@ class SceneCastBuilderDialog(QDialog):
                 if bundle_index >= 0:
                     bundle_combo.setCurrentIndex(bundle_index)
                 primary_radio.setChecked(bool(initial_entry.get("primary")))
+                audio_check.setChecked(bool(initial_entry.get("use_audio")))
 
             row = QWidget(self)
             row_layout = QHBoxLayout(row)
             row_layout.setContentsMargins(0, 0, 0, 0)
             row_layout.addWidget(bundle_combo, 1)
+            row_layout.addWidget(audio_check, 0)
             row_layout.addWidget(primary_radio, 0)
             self.slots_form.addRow(label, row)
 
@@ -715,6 +747,7 @@ class SceneCastBuilderDialog(QDialog):
                 "source_subject_id": source_subject_id,
                 "bundle_combo": bundle_combo,
                 "primary_radio": primary_radio,
+                "audio_check": audio_check,
             }
 
     # ---- result accessors (read after exec_() == QDialog.Accepted) ----
@@ -749,6 +782,7 @@ class SceneCastBuilderDialog(QDialog):
                 "subject_id": slot["subject_id"],
                 "bundle_id": bundle_id,
                 "primary": slot["primary_radio"].isChecked(),
+                "use_audio": slot["audio_check"].isChecked(),
             })
         return build_cast_entries_json(assignments)
 
@@ -770,6 +804,7 @@ class SceneCastBuilderDialog(QDialog):
                 "source_profile_id": profile_id,
                 "source_subject_id": slot["source_subject_id"],
                 "primary": slot["primary_radio"].isChecked(),
+                "use_audio": slot["audio_check"].isChecked(),
             })
         return build_source_profile_cast_entries_json(assignments)
 

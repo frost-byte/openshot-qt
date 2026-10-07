@@ -93,6 +93,19 @@ class SceneCastWidgetTests(unittest.TestCase):
         self.assertIn("alex", text)
         self.assertIn("alex_bundle", text)
 
+    def test_summary_label_marks_entries_that_use_their_bundle_audio(self):
+        dlg = GenerateMediaDialog(templates=_scene_cast_template())
+        cast_widget, _ = dlg._extra_input_widgets["cast_entries_json"]
+        cast_widget.setText(json.dumps([
+            {"subject_id": "alex", "bundle_id": "alex_bundle", "use_audio": True},
+            {"subject_id": "sam", "bundle_id": "sam_bundle"},
+        ]))
+        dlg._refresh_scene_cast_summary()
+        text = dlg.scene_cast_summary_label.text()
+        self.assertIn("alex: alex_bundle (+audio)", text)
+        self.assertIn("sam: sam_bundle", text)
+        self.assertNotIn("sam_bundle (+audio)", text)
+
     def test_empty_state_shows_no_cast_selected(self):
         dlg = GenerateMediaDialog(templates=_scene_cast_template())
         self.assertEqual(dlg.scene_cast_summary_label.text(), "No cast selected.")
@@ -167,10 +180,24 @@ class SceneCastWidgetTests(unittest.TestCase):
         dlg = GenerateMediaDialog(templates=_scene_cast_template())
         self.assertIs(dlg.tabs.currentWidget(), dlg.page_reference)
 
-    def test_non_scene_cast_template_still_defaults_to_prompt_tab(self):
-        templates = [{"id": "t2", "name": "Plain", "template": {"extra_inputs": [
-            {"key": "some_text", "type": "text", "label": "Some Text"},
+    def test_media_extra_input_template_defaults_to_reference_tab(self):
+        templates = [{"id": "t2", "name": "Image Template", "template": {"extra_inputs": [
+            {"key": "overlay_image", "type": "image", "label": "Overlay Image"},
+            {"key": "blend_prompt", "type": "text", "label": "Prompt"},
         ]}}]
+        dlg = GenerateMediaDialog(templates=templates)
+        self.assertIs(dlg.tabs.currentWidget(), dlg.page_reference)
+
+    def test_non_scene_cast_text_only_template_still_defaults_to_prompt_tab(self):
+        # The workflow must actually consume the generic Prompt (__openshot_prompt__): a
+        # template with extra inputs that never uses it has its Prompt tab hidden and so
+        # opens on the Reference tab instead (see the media/blend test above).
+        templates = [{"id": "t2", "name": "Plain", "template": {
+            "extra_inputs": [
+                {"key": "some_text", "type": "text", "label": "Some Text"},
+            ],
+            "workflow": {"1": {"class_type": "StringConstantMultiline", "inputs": {"string": "__openshot_prompt__"}}},
+        }}]
         dlg = GenerateMediaDialog(templates=templates)
         self.assertIs(dlg.tabs.currentWidget(), dlg.page_prompt)
 

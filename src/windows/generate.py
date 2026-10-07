@@ -475,8 +475,9 @@ class GenerateMediaDialog(QDialog):
                 if not isinstance(cast_entry, dict):
                     continue
                 marker = "★ " if cast_entry.get("primary") else ""
-                parts.append("{}{} → {}".format(
-                    marker, cast_entry.get("source_subject_id", "?"), cast_entry.get("bundle_id", "?"),
+                audio_note = " (+audio)" if cast_entry.get("use_audio") else ""
+                parts.append("{}{} → {}{}".format(
+                    marker, cast_entry.get("source_subject_id", "?"), cast_entry.get("bundle_id", "?"), audio_note,
                 ))
         else:
             composition_widget = self._scene_cast_entries.get("composition_name")
@@ -487,8 +488,9 @@ class GenerateMediaDialog(QDialog):
                 if not isinstance(cast_entry, dict):
                     continue
                 marker = "★ " if cast_entry.get("primary") else ""
-                parts.append("{}{}: {}".format(
-                    marker, cast_entry.get("subject_id", "?"), cast_entry.get("bundle_id", "?"),
+                audio_note = " (+audio)" if cast_entry.get("use_audio") else ""
+                parts.append("{}{}: {}{}".format(
+                    marker, cast_entry.get("subject_id", "?"), cast_entry.get("bundle_id", "?"), audio_note,
                 ))
         self.scene_cast_summary_label.setText(" · ".join(parts) if parts else "No cast selected.")
 
