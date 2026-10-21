@@ -179,13 +179,21 @@ class VideoWidget(QWidget, updates.UpdateInterface):
            Order: translate(x,y) → translate(origin) → rotate → shear → untranslate(origin) → scale,
            matching libopenshot's Clip::get_transform so shear/scale share the same pivot and basis.
         """
-        sx = max(float(props["scale_x"]["value"]), 0.001)
-        sy = max(float(props["scale_y"]["value"]), 0.001)
+        # A flipped clip (negative scale) covers the same box as its mirror image,
+        # and libopenshot mirrors its rotation pivot along the flipped axis.
+        raw_sx = float(props["scale_x"]["value"])
+        raw_sy = float(props["scale_y"]["value"])
+        sx = max(abs(raw_sx), 0.001)
+        sy = max(abs(raw_sy), 0.001)
         rot = float(props["rotation"]["value"])
         shx = float(props["shear_x"]["value"])
         shy = float(props["shear_y"]["value"])
         ox = float(props["origin_x"]["value"])
         oy = float(props["origin_y"]["value"])
+        if raw_sx < 0:
+            ox = 1.0 - ox
+        if raw_sy < 0:
+            oy = 1.0 - oy
 
         # Clip-local pivot (pre-scale) and its translated amount once clip scale is applied.
         local_origin_x = sw * ox
@@ -1588,7 +1596,7 @@ class VideoWidget(QWidget, updates.UpdateInterface):
                 elif self.transform_mode == 'shear_top':
                     # Get current keyframe shear value
                     shear_x = raw_properties.get('shear_x').get('value')
-                    scale_x = raw_properties.get('scale_x').get('value')
+                    scale_x = abs(raw_properties.get('scale_x').get('value'))
 
                     # Calculate new location coordinates
                     aspect_ratio = (self.clipBounds.width() / self.clipBounds.height()) * 2.0
@@ -1604,7 +1612,7 @@ class VideoWidget(QWidget, updates.UpdateInterface):
 
                 elif self.transform_mode == 'shear_bottom':
                     # Get current keyframe shear value
-                    scale_x = raw_properties.get('scale_x').get('value')
+                    scale_x = abs(raw_properties.get('scale_x').get('value'))
                     shear_x = raw_properties.get('shear_x').get('value')
 
                     # Calculate new location coordinates
@@ -1622,7 +1630,7 @@ class VideoWidget(QWidget, updates.UpdateInterface):
                 elif self.transform_mode == 'shear_left':
                     # Get current keyframe shear value
                     shear_y = raw_properties.get('shear_y').get('value')
-                    scale_y = raw_properties.get('scale_y').get('value')
+                    scale_y = abs(raw_properties.get('scale_y').get('value'))
 
                     # Calculate new location coordinates
                     aspect_ratio = (self.clipBounds.height() / self.clipBounds.width()) * 2.0
@@ -1638,7 +1646,7 @@ class VideoWidget(QWidget, updates.UpdateInterface):
 
                 elif self.transform_mode == 'shear_right':
                     # Get current keyframe shear value
-                    scale_y = raw_properties.get('scale_y').get('value')
+                    scale_y = abs(raw_properties.get('scale_y').get('value'))
                     shear_y = raw_properties.get('shear_y').get('value')
 
                     # Calculate new location coordinates
@@ -1658,8 +1666,8 @@ class VideoWidget(QWidget, updates.UpdateInterface):
                     if self.rotation_drag_value is None:
                         self.rotation_drag_value = raw_properties.get('rotation').get('value')
                     rotation = self.rotation_drag_value
-                    scale_x = max(float(raw_properties.get('scale_x').get('value')), 0.001)
-                    scale_y = max(float(raw_properties.get('scale_y').get('value')), 0.001)
+                    scale_x = max(abs(float(raw_properties.get('scale_x').get('value'))), 0.001)
+                    scale_y = max(abs(float(raw_properties.get('scale_y').get('value'))), 0.001)
 
                     # Calculate new location coordinates
                     is_on_right = event.pos().x() > self.originHandle.x()
@@ -1686,9 +1694,14 @@ class VideoWidget(QWidget, updates.UpdateInterface):
                         fps_float, frame_number=clip_frame_number)
 
                 elif self.transform_mode.startswith('scale_'):
-                    # Get current scale keyframe value
-                    scale_x = max(float(raw_properties.get('scale_x').get('value')), 0.001)
-                    scale_y = max(float(raw_properties.get('scale_y').get('value')), 0.001)
+                    # Get current scale keyframe value. Resize by magnitude so a
+                    # flipped clip (negative scale) stays flipped.
+                    raw_scale_x = float(raw_properties.get('scale_x').get('value'))
+                    raw_scale_y = float(raw_properties.get('scale_y').get('value'))
+                    sign_x = -1.0 if raw_scale_x < 0 else 1.0
+                    sign_y = -1.0 if raw_scale_y < 0 else 1.0
+                    scale_x = max(abs(raw_scale_x), 0.001)
+                    scale_y = max(abs(raw_scale_y), 0.001)
 
                     half_w = self.clipBounds.width() / 2.0
                     half_h = self.clipBounds.height() / 2.0
@@ -1726,18 +1739,18 @@ class VideoWidget(QWidget, updates.UpdateInterface):
                     if scale_x != 0.001:
                         self.updateClipProperty(
                             self.transforming_clips[0].id, clip_frame_number,
-                            'scale_x', scale_x,
+                            'scale_x', sign_x * scale_x,
                             refresh=(not both_scaled))
                         self._apply_delta_to_clips(
-                            'scale_x', scale_x - raw_properties.get('scale_x').get('value'),
-                            fps_float, frame_number=clip_frame_number)
+                            'scale_x', scale_x - abs(raw_scale_x),
+                            fps_float, frame_number=clip_frame_number, magnitude=True)
                     if scale_y != 0.001:
                         self.updateClipProperty(
                             self.transforming_clips[0].id, clip_frame_number,
-                            'scale_y', scale_y)
+                            'scale_y', sign_y * scale_y)
                         self._apply_delta_to_clips(
-                            'scale_y', scale_y - raw_properties.get('scale_y').get('value'),
-                            fps_float, frame_number=clip_frame_number)
+                            'scale_y', scale_y - abs(raw_scale_y),
+                            fps_float, frame_number=clip_frame_number, magnitude=True)
 
             # Force re-paint
             self.update()
@@ -2354,7 +2367,7 @@ class VideoWidget(QWidget, updates.UpdateInterface):
 
         return frame
 
-    def _apply_delta_to_clips(self, property_key, delta, fps_float, frame_number=None):
+    def _apply_delta_to_clips(self, property_key, delta, fps_float, frame_number=None, magnitude=False):
         for clip, obj in zip(self.transforming_clips[1:], self.transforming_clip_objects[1:]):
             if frame_number is None:
                 frame = self._get_clip_frame_number(clip, fps_float)
@@ -2362,9 +2375,14 @@ class VideoWidget(QWidget, updates.UpdateInterface):
                 frame = max(1, int(round(frame_number)))
             props = json.loads(obj.PropertiesJSON(frame))
             value = props.get(property_key).get('value')
+            if magnitude and value < 0:
+                # Grow/shrink a flipped clip's magnitude without un-flipping it
+                delta_value = value - delta
+            else:
+                delta_value = value + delta
             if self.transaction_id:
                 get_app().updates.transaction_id = self.transaction_id
-            self.updateClipProperty(clip.id, frame, property_key, value + delta, refresh=False)
+            self.updateClipProperty(clip.id, frame, property_key, delta_value, refresh=False)
 
     def _crop_resize_rect(self, width, height, left, top, right, bottom, x_off, y_off):
         width = float(max(width, 0.0))
@@ -2503,8 +2521,8 @@ class VideoWidget(QWidget, updates.UpdateInterface):
         source_width = max(source_size.width(), 0.0001)
         source_height = max(source_size.height(), 0.0001)
 
-        sx = max(float(raw_properties.get('scale_x').get('value')), 0.001)
-        sy = max(float(raw_properties.get('scale_y').get('value')), 0.001)
+        sx = max(abs(float(raw_properties.get('scale_x').get('value'))), 0.001)
+        sy = max(abs(float(raw_properties.get('scale_y').get('value'))), 0.001)
         scaled_width = source_width * sx
         scaled_height = source_height * sy
 

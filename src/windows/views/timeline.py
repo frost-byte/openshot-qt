@@ -169,9 +169,10 @@ from classes.path_utils import absolute_media_path
 from classes.keyframe_editing import initialize_split_clip_keyframes
 from classes.proxy_service import dialog_preview_reader_data
 from .timeline_backend.enums import (
-    MenuFade, MenuRotate, MenuLayout, MenuAlign, MenuAnimate, MenuVolume,
+    MenuFade, MenuRotate, MenuFlip, MenuLayout, MenuAlign, MenuAnimate, MenuVolume,
     MenuTime, MenuCopy, MenuSlice, MenuSplitAudio
 )
+from .timeline_backend.flip import can_flip, flip_property, is_flipped, set_flipped
 from .timeline_backend.qwidget import TimelineWidget
 from .timeline_backend.colors import effect_color_hex
 from .menu import StyledContextMenu, add_bound_action
@@ -1914,6 +1915,26 @@ class TimelineView(updates.UpdateInterface, ViewClass):
         Rotation_180_Flip.triggered.connect(partial(
             self.Rotate_Triggered, MenuRotate.FLIP_180, clip_ids))
         Transform_Menu.addMenu(Rotation_Menu)
+
+        # Flip mirrors via negative scale, which needs gravity centered on that axis
+        Flip_Menu = StyledContextMenu(title=_("Flip"), parent=self)
+        Flip_Menu.setToolTipsVisible(True)
+        flip_clips = [c.data for c in (Clip.get(id=cid) for cid in clip_ids) if c]
+        for flip, label, requirement in (
+                (MenuFlip.HORIZONTAL, _("Flip Horizontal"),
+                 _("Requires Top, Center, or Bottom gravity and a scale mode other than None")),
+                (MenuFlip.VERTICAL, _("Flip Vertical"),
+                 _("Requires Left, Center, or Right gravity and a scale mode other than None"))):
+            prop = flip_property(flip)
+            Flip_Action = Flip_Menu.addAction(label)
+            Flip_Action.setCheckable(True)
+            Flip_Action.setChecked(bool(flip_clips) and all(is_flipped(d, prop) for d in flip_clips))
+            if flip_clips and all(can_flip(d, prop) for d in flip_clips):
+                Flip_Action.triggered.connect(partial(self.Flip_Triggered, flip, clip_ids))
+            else:
+                Flip_Action.setEnabled(False)
+                Flip_Action.setToolTip(requirement)
+        Transform_Menu.addMenu(Flip_Menu)
 
         Crop_Menu = StyledContextMenu(title=_("Crop"), parent=self)
         Crop_None = Crop_Menu.addAction(_("No Crop"))
@@ -4614,6 +4635,20 @@ class TimelineView(updates.UpdateInterface, ViewClass):
 
             # Save changes
             self.update_clip_data(clip.data, only_basic_props=False, ignore_reader=True)
+
+    def Flip_Triggered(self, action, clip_ids, *_args):
+        """Mirror the selected clips (toggling as a group) in a single undo step."""
+        prop = flip_property(action)
+        clips = [c for c in (Clip.get(id=cid) for cid in clip_ids) if c and can_flip(c.data, prop)]
+        flipped = not all(is_flipped(clip.data, prop) for clip in clips)
+        tid = self.get_uuid()
+        get_app().updates.transaction_id = tid
+        try:
+            for clip in clips:
+                if set_flipped(clip.data, prop, flipped):
+                    self.update_clip_data(clip.data, only_basic_props=False, ignore_reader=True)
+        finally:
+            get_app().updates.transaction_id = None
 
     def No_Transform_Triggered(self, clip_ids):
         """Reset rotation, crop, and layout for all selected clips in a single undo step."""
