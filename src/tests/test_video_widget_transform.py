@@ -267,6 +267,44 @@ class VideoWidgetTransformTests(unittest.TestCase):
                 self.assertLessEqual(left.x() + left.width(), 0.0)
                 self.assertGreaterEqual(right.x(), self.viewport.width())
 
+    def test_flipped_clip_outline_matches_unflipped_box_with_mirrored_pivot(self):
+        for scale_mode in (openshot.SCALE_FIT, openshot.SCALE_STRETCH, openshot.SCALE_CROP):
+            with self.subTest(scale_mode=scale_mode):
+                normal = self.rect_for(scale_mode, scale_x=0.8, scale_y=0.6)
+                flipped = self.rect_for(scale_mode, scale_x=-0.8, scale_y=-0.6)
+                self.assertEqual(flipped, normal)
+
+        rect = self.rect_for(openshot.SCALE_FIT, scale_x=-0.5)
+        clip_props = props(scale_x=-0.5)
+        clip_props["origin_x"] = {"value": 0.25}
+        transform, unpacked, origin = VideoWidget._build_clip_transform(
+            self.widget, rect.x(), rect.y(), rect.width(), rect.height(), clip_props)
+        box = transform.mapRect(QRectF(0, 0, rect.width(), rect.height()))
+
+        self.assertEqual(unpacked[0], 0.5)
+        self.assertAlmostEqual(box.width(), rect.width() * 0.5)
+        # libopenshot pivots a horizontally flipped clip at the mirrored origin
+        self.assertAlmostEqual(origin.x(), box.x() + box.width() * 0.75)
+
+    def test_multi_clip_scale_delta_keeps_flipped_clips_flipped(self):
+        updates = []
+        widget = VideoWidget.__new__(VideoWidget)
+        other = types.SimpleNamespace(id="C2")
+        widget.transforming_clips = [types.SimpleNamespace(id="C1"), other]
+        widget.transaction_id = None
+        widget.updateClipProperty = lambda clip_id, frame, key, value, refresh=True: updates.append(
+            (clip_id, key, value))
+
+        for value, magnitude, expected in ((-1.0, True, -1.5), (1.0, True, 1.5), (-1.0, False, -0.5)):
+            with self.subTest(value=value, magnitude=magnitude):
+                updates.clear()
+                obj = types.SimpleNamespace(PropertiesJSON=lambda frame, v=value: json.dumps(
+                    {"scale_x": {"value": v}}))
+                widget.transforming_clip_objects = [None, obj]
+                VideoWidget._apply_delta_to_clips(widget, "scale_x", 0.5, 30.0, frame_number=1,
+                                                  magnitude=magnitude)
+                self.assertEqual(updates, [("C2", "scale_x", expected)])
+
     def test_non_crop_locations_remain_canvas_relative(self):
         for scale_mode in (
             openshot.SCALE_FIT,

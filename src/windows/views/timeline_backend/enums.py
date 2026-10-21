@@ -45,6 +45,11 @@ class MenuRotate(Enum):
     FLIP_180 = auto()
 
 
+class MenuFlip(Enum):
+    HORIZONTAL = 0
+    VERTICAL = auto()
+
+
 class MenuLayout(Enum):
     NONE = 0
     CENTER = auto()

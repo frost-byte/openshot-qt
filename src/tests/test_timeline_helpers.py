@@ -2323,6 +2323,47 @@ class TimelineHelperTests(unittest.TestCase):
                         expected["Points"][-1]["co"]["X"] = round(end * 30) + 1
                         self.assertEqual(existing.data["brightness"], expected)
 
+    def test_flip_toggles_selection_as_one_undo_step_and_skips_unsupported_clips(self):
+        def flip_clip(clip_id, gravity, scale_x):
+            point = json.loads(openshot.Point(1, scale_x, openshot.BEZIER).Json())
+            return types.SimpleNamespace(id=clip_id, data={
+                "id": clip_id, "gravity": gravity, "scale": openshot.SCALE_FIT,
+                "scale_x": {"Points": [point]}})
+
+        clips = {
+            "C1": flip_clip("C1", openshot.GRAVITY_CENTER, 1.0),
+            "C2": flip_clip("C2", openshot.GRAVITY_TOP, -1.5),
+            "C3": flip_clip("C3", openshot.GRAVITY_TOP_LEFT, 1.0),
+        }
+        updates = types.SimpleNamespace(transaction_id=None)
+        saved = []
+        helper = types.SimpleNamespace(
+            get_uuid=lambda: "tx-flip",
+            update_clip_data=lambda data, **kwargs: saved.append(
+                (data["id"], data["scale_x"]["Points"][0]["co"]["Y"], updates.transaction_id, kwargs)))
+        app = types.SimpleNamespace(updates=updates)
+
+        def scale_x_values():
+            return {cid: clip.data["scale_x"]["Points"][0]["co"]["Y"] for cid, clip in clips.items()}
+
+        with patch.object(self.timeline_module, "get_app", return_value=app), \
+                patch.object(self.timeline_module.Clip, "get", side_effect=lambda id: clips.get(id)):
+            # Mixed selection flips everything that is not flipped yet
+            self.timeline_module.TimelineView.Flip_Triggered(
+                helper, self.timeline_module.MenuFlip.HORIZONTAL, ["C1", "C2", "C3", "missing"], False)
+            self.assertEqual(scale_x_values(), {"C1": -1.0, "C2": -1.5, "C3": 1.0})
+            self.assertEqual(saved, [("C1", -1.0, "tx-flip",
+                                      {"only_basic_props": False, "ignore_reader": True})])
+            self.assertIsNone(updates.transaction_id)
+
+            # Once every supported clip is flipped, the action un-flips them together
+            saved.clear()
+            self.timeline_module.TimelineView.Flip_Triggered(
+                helper, self.timeline_module.MenuFlip.HORIZONTAL, ["C1", "C2", "C3"])
+            self.assertEqual(scale_x_values(), {"C1": 1.0, "C2": 1.5, "C3": 1.0})
+            self.assertEqual([entry[:3] for entry in saved], [("C1", 1.0, "tx-flip"), ("C2", 1.5, "tx-flip")])
+            self.assertIsNone(updates.transaction_id)
+
     def test_motion_wipe_mask_uses_high_static_contrast(self):
         helper = self.make_motion_helper()
         clip = self.make_motion_clip()
