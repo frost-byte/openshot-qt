@@ -152,13 +152,18 @@ def _resize_hit_at(widget, pos):
 
 
 class TimelineWidgetBase(RazorMixin, QWidget):
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, *, snapshot=False):
         super().__init__(parent)
+        # Read-only offscreen instances reuse the actual painters without wiring
+        # editing signals, subscribing to project updates, or starting workers.
+        self.snapshot_mode = snapshot
+        self.win = None if snapshot else get_app().window
 
         # Enable drag and drop
         self.new_item = None
         self.item_type = None
         self.setAcceptDrops(True)
+        self.setFocusPolicy(Qt.StrongFocus)
 
         # Translate object
         _ = get_app()._tr
@@ -261,6 +266,9 @@ class TimelineWidgetBase(RazorMixin, QWidget):
         self._project_resize_initial_duration = 0.0
         self._project_resize_min_duration = 0.0
         self._project_resize_keep_right = False
+        self._project_resize_timer = QTimer(self)
+        self._project_resize_timer.setInterval(16)
+        self._project_resize_timer.timeout.connect(self._projectResizeEdgeTick)
 
         # Drag/selection helpers
         self.selection_rect = QRectF()
@@ -325,7 +333,7 @@ class TimelineWidgetBase(RazorMixin, QWidget):
         self._suspend_thumbnail_requests = False
         self._drag_preview_thumbnail_suspended = False
         self._drag_preview_prev_thumb_suspend = False
-        self.thumbnail_manager = TimelineThumbnailManager(self)
+        self.thumbnail_manager = None if snapshot else TimelineThumbnailManager(self)
 
         # Helpers for geometry, snapping and painting
         self.geometry = Geometry(self)
@@ -342,10 +350,11 @@ class TimelineWidgetBase(RazorMixin, QWidget):
         self.keyframe_panel_painter = KeyframePanelPainter(self)
         self.selection_painter = SelectionPainter(self)
         self.scrollbar_painter = ScrollbarPainter(self)
-        self.thumbnail_manager.thumbnail_ready.connect(
-            self._handle_thumbnail_ready,
-            type=Qt.QueuedConnection,
-        )
+        if self.thumbnail_manager:
+            self.thumbnail_manager.thumbnail_ready.connect(
+                self._handle_thumbnail_ready,
+                type=Qt.QueuedConnection,
+            )
 
         # In-place editor for the painted playhead time in the ruler header.
         self.playhead_time_editor = TimecodeLineEdit(self)
@@ -398,26 +407,28 @@ class TimelineWidgetBase(RazorMixin, QWidget):
         super().setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
 
         # Add self as listener to project data updates (used to update the timeline)
-        get_app().updates.add_listener(self)
+        if not snapshot:
+            get_app().updates.add_listener(self)
 
         # Set mouse tracking
         self.setMouseTracking(True)
 
-        # Get a reference to the window object
-        self.win = get_app().window
-        self.win.SeekSignal.connect(self._razor_user_seek)
-        self.win.PlaySignal.connect(self._razor_user_seek)
-        self.win.ThemeChangedSignal.connect(self.apply_theme)
+        if not snapshot:
+            # Get a reference to the window object
+            self.win = get_app().window
+            self.win.SeekSignal.connect(self._razor_user_seek)
+            self.win.PlaySignal.connect(self._razor_user_seek)
+            self.win.ThemeChangedSignal.connect(self.apply_theme)
 
-        # Connect zoom functionality
-        self.win.TimelineScrolled.connect(self.update_scrollbars)
-        self.win.TimelineScroll.connect(self.set_scroll_left)
-        self.win.TimelineZoom.connect(self._apply_external_zoom)
+            # Connect zoom functionality
+            self.win.TimelineScrolled.connect(self.update_scrollbars)
+            self.win.TimelineScroll.connect(self.set_scroll_left)
+            self.win.TimelineZoom.connect(self._apply_external_zoom)
 
-        self.win.TimelineResize.connect(self.delayed_resize_callback)
+            self.win.TimelineResize.connect(self.delayed_resize_callback)
 
-        # Connect Selection signals
-        self.win.SelectionChanged.connect(self.handle_selection)
+            # Connect Selection signals
+            self.win.SelectionChanged.connect(self.handle_selection)
 
         # Repaint when the Project Files highlight target changes (the highlight bar
         # is drawn live every paint, not cached, so a plain repaint suffices).
@@ -438,7 +449,8 @@ class TimelineWidgetBase(RazorMixin, QWidget):
         self.events = TimelineEvents(self)
         self._last_event = None
         self._press_hit = None
-        self._buildStateMachine()
+        if not snapshot:
+            self._buildStateMachine()
 
         # Effect icon hit targets (populated by the clip painter)
         self._effect_icon_rects = []
@@ -684,7 +696,22 @@ class TimelineWidgetBase(RazorMixin, QWidget):
                 self._project_duration_override = max(0.0, float(duration))
             except (TypeError, ValueError):
                 self._project_duration_override = None
+        if self._project_duration_override is not None:
+            # Keep the end at the viewport edge. Once scrolling reaches time
+            # zero, adjust zoom continuously instead of detaching the handle.
+            view_w = self.width() - self.track_name_width - self.scroll_bar_thickness
+            tick_pixels = float(get_app().project.get("tick_pixels") or 100.0)
+            initial_zoom = self._project_resize_initial_zoom
+            if view_w > 0 and self._project_resize_keep_right:
+                fit_zoom = self._project_duration_override * tick_pixels / view_w
+                self.zoom_factor = self._clamp_zoom_factor(min(initial_zoom, fit_zoom))
         self.geometry.mark_dirty()
+        self.geometry.ensure()
+        slider = getattr(self.win, "sliderZoomWidget", None)
+        if slider:
+            slider.setZoomFactor(self.zoom_factor, emit=False)
+            slider.update_scrollbars(list(self.scrollbar_position))
+            slider.changed(None)
         self.update()
 
     def _content_height_hint(self):
@@ -1019,7 +1046,7 @@ class TimelineWidgetBase(RazorMixin, QWidget):
                 True,
             )
 
-            if not get_app().window.timeline:
+            if not getattr(self, "snapshot_mode", False) and not getattr(get_app().window, "timeline", None):
                 return
 
             # Skip panel property rebuild during an active keyframe drag
@@ -2321,7 +2348,7 @@ class TimelineWidgetBase(RazorMixin, QWidget):
         width_norm = max(0.0, min(self.scrollbar_position[1] - self.scrollbar_position[0], 1.0))
         if (
             view_w > 0.0
-            and timeline_w > view_w
+            and timeline_w > view_w + 1e-6
             and width_norm > 0.0
             and width_norm < 1.0
         ):
@@ -2394,7 +2421,15 @@ class TimelineWidgetBase(RazorMixin, QWidget):
         get_app().window.TimelineScrolled.emit(slider_positions)
 
     def _clamp_zoom_factor(self, zoom_factor):
-        return max(0.05, min(zoom_factor, 200.0))
+        # Long projects must still fit in the viewport. A fixed ceiling leaves
+        # the overview selection stranded in the middle after zoom-to-fit.
+        maximum = 200.0
+        view_width = float(self.scrollbar_position[3] or 0.0)
+        if view_width > 0.0:
+            duration = float(self._current_project_duration() or 0.0)
+            tick_pixels = float(get_app().project.get("tick_pixels") or 100.0)
+            maximum = max(maximum, duration * tick_pixels / view_width)
+        return max(0.05, min(zoom_factor, maximum))
 
     def _capture_playhead_zoom_anchor(self):
         """Preserve the playhead's current viewport X pixel for the next zoom."""
@@ -2656,6 +2691,8 @@ class TimelineWidgetBase(RazorMixin, QWidget):
 
 
     def _select_timeline_item(self, item_id, item_type, clear_existing):
+        self._keyboard_playhead_cycle = None
+        self._keyboard_edge = None
         if item_id is None or not item_type:
             return
         item_id_str = str(item_id)
@@ -2744,11 +2781,11 @@ class TimelineWidgetBase(RazorMixin, QWidget):
             return
 
         furthest = self._furthest_timeline_edge()
-        min_length = 300.0
-        padding = 10.0
-        desired = max(min_length, furthest + padding)
         current = float(get_app().project.get("duration") or 0.0)
-        if desired > current + 1e-3:
+        # Respect a manually shortened timeline, including one ending exactly at
+        # the last clip. Add working room only when content exceeds its boundary.
+        if furthest > current + 1e-3:
+            desired = furthest + 10.0
             timeline.resizeTimeline(desired)
 
     def _clip_menu_rect(self, rect):
@@ -3281,6 +3318,8 @@ class TimelineWidgetBase(RazorMixin, QWidget):
 
             timeline_handle = self.geometry.timeline_handle_rect()
             if timeline_handle.contains(pos):
+                if hover:
+                    hover.set_target("timeline-margin", timeline_handle, "track")
                 self.setCursor(self.cursors.get("resize_x", Qt.SizeHorCursor))
                 return
 
@@ -3299,6 +3338,13 @@ class TimelineWidgetBase(RazorMixin, QWidget):
             if not self._is_timeline_content_pos(pos):
                 super().mouseDoubleClickEvent(event)
                 return
+            if self.geometry.timeline_handle_rect().contains(pos):
+                self._last_event = event
+                self._startProjectResize()
+                self._set_project_duration_override(self._project_resize_min_duration)
+                self._finishProjectResize()
+                event.accept()
+                return
             # Keyframe and effect hitboxes can extend beyond the clip body.
             if (self._get_keyframe_at(pos) or self._panel_marker_at(pos)
                     or self._effect_icon_at(pos)):
@@ -3313,6 +3359,15 @@ class TimelineWidgetBase(RazorMixin, QWidget):
         super().mouseDoubleClickEvent(event)
 
     def mousePressEvent(self, event):
+        self._keyboard_end_trim_preview()
+        self._keyboard_playhead_cycle = None
+        self._keyboard_edge = None
+        self.setFocus(Qt.MouseFocusReason)
+        self.geometry.ensure()
+        for rect, track, _name in self.geometry.iter_tracks():
+            if rect.top() <= event.pos().y() <= rect.bottom():
+                self._keyboard_layer = track.data["number"]
+                break
         if getattr(self, "_properties_layout_anchor", None) is not None:
             self.end_properties_layout_change()
         if self.enable_razor and not (

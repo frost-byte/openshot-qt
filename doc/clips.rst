@@ -37,10 +37,10 @@ To **make adjustments** to a property:
 - For **precise** adjustments, double-click the property to enter exact values.
 - If the property involves **non-numerical choices**, right-click or double-click for options.
 
-Clip properties play a vital role in the :ref:`animation_ref` system. Whenever you modify a clip property, a
-``key-frame`` is automatically created at the current playhead position. If you want a property change to apply
-throughout the entire clip, ensure the playhead is positioned at or before the clip's start, before making adjustments.
-You can easily find a clip's start by using the :guilabel:`next/previous marker` feature on the Timeline toolbar.
+You can use properties to change a clip's appearance or to :ref:`animate it over time <animation_ref>`.
+For example, set a smaller scale at the beginning and a larger scale at the end to create a zoom.
+:ref:`auto_keyframes_ref` records these changes at the playhead. Turn it off when you want to adjust
+existing values without adding keyframes.
 
 .. image:: images/clip-overview.jpg
 
@@ -66,6 +66,11 @@ sections from the beginning or ending of a clip.
 To **slice** a clip into smaller sections, OpenShot offers several options, including dividing or slicing a clip
 at the play-head (*vertical playback line*) position. Trimming and slicing clips are powerful tools that
 allow users to rearrange sections of video and remove unwanted parts.
+
+Trimming and slicing preserve the timing of any animation you have already added. If you cut a clip
+halfway through a zoom, the right-hand piece continues from that point in the zoom.
+To prepare shorter segments before you start editing, use :ref:`Split File <split_clip_ref>` in Project Files.
+Those segments are ready to animate from their own beginning when you add them to the timeline.
 
 Here is a list of all methods for cutting and/or trimming clips in OpenShot:
 
@@ -527,10 +532,13 @@ applied to all selected clips together.
 - Dragging along the blue lines will **shear** the image in that direction.
 - Dragging the circle in the middle will move the **origin point** that controls the center of **rotation**. 
 
-Note: Pay close attention to the play-head 
-position (red playback line). Key frames are automatically created at the current playback position, to help quickly create 
-animations. If you want to transform a clip with **no animation**, be sure the playhead is positioned before (to the left)
-of your clip. You can also manually adjust these same clip properties in the property editor, see :ref:`clip_properties_ref`.
+To give a clip a fixed size and position before animating it, turn :ref:`auto_keyframes_ref` off and
+adjust the handles while viewing the clip. To animate a move or resize, turn it on, move the playhead,
+and adjust the handles at each moment you want to change.
+
+If the clip already has animation, editing with Auto Keyframes off changes the keyframe at or before
+the playhead. Move directly to a keyframe to adjust that moment. You can also enter exact values in
+the Properties dock; see :ref:`clip_properties_ref`.
 
 .. image:: images/clip-transform.jpg
 
@@ -550,6 +558,8 @@ interactive crop handles in the video preview. The submenu offers:
 
 Drag the blue handles to adjust the crop boundaries, move the cropped area around, or move the center handle to
 reposition the image inside the cropped area.
+
+.. _timeline_waveform_display_ref:
 
 Waveform
 """"""""
@@ -593,7 +603,7 @@ them look louder than they are.
 
 New waveforms use 200 samples per second by default, providing several measurements within a typical video frame.
 Change this density with :guilabel:`Edit → Preferences → Timeline → Waveform Samples (per second)`. Higher values show
-more detail when zoomed in but increase project data size and analysis time. The painter reduces dense data to the
+more detail when zoomed in but increase waveform cache size and analysis time. The painter reduces dense data to the
 visible timeline pixels, and its rendered-waveform cache keeps normal scrolling and repainting inexpensive. Live
 microphone previews use the selected density and the same peak/RMS display as completed recordings.
 
@@ -602,6 +612,19 @@ have no format marker, so OpenShot deliberately displays them with the original 
 instead of becoming unexpectedly thin. Older waveform data without a stored density defaults to its original 20
 samples per second, and data without an RMS envelope remains a single solid waveform. A project may safely contain
 legacy and new waveforms together.
+
+**Where waveform data is stored**
+
+Timeline waveforms are saved as compressed ``.wfc`` files in the ``waveforms``
+subfolder of your project's ``_assets`` folder. The ``.osp`` file holds small
+references instead of the waveform measurements themselves. Keep the assets
+folder with your project when moving or backing it up.
+
+Older projects with embedded waveform data are converted automatically when
+opened. Saving writes the smaller project file and its waveform assets; the
+conversion does not change the original audio or the waveform's display scale.
+See :ref:`large_waveform_projects_ref` if an older project is unusually large or
+slow to open.
 
 To regenerate cached waveform data using the current method, choose :guilabel:`Edit → Clear → Waveform Display Data`,
 then show the waveform again. This affects only cached display data and does not modify the media file or its audio.
@@ -692,13 +715,12 @@ Selections``. Pick that entry to edit all selected items together, only
 properties they share will be visible. If a field is blank, the values differ
 between items, but you can still change it or insert a keyframe for all of them.
 
-Note: Pay close attention to where the play-head (i.e. red playback line) is. Key frames are automatically created at the current playback
-position, to help quickly create animations.
-
 When animating clip properties, you can fade a clip from opaque to transparent with ``alpha``, slide a clip around the 
 screen with ``location_x`` and ``location_y``, scale a clip smaller or larger with the ``scale_x`` and ``scale_y``, 
-fade the volume of a clip quieter or louder with ``volume``, and much more. If you want to set a single, static clip property with 
-**no animation**, be sure the playhead is positioned at the start of your clip (to the left) when adjusting the property value.
+fade the volume of a clip quieter or louder with ``volume``, and much more. Leave :ref:`auto_keyframes_ref`
+on to record changes at the playhead as you edit. Turn it off to adjust existing keyframes, or to set a
+steady value for a property you have not animated yet. The Auto Keyframes section also explains how to
+place keyframes manually.
 
 See the table below for a full list of clip properties.
 

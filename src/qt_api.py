@@ -2374,13 +2374,24 @@ def _patch_enums_for_qt6():
             except Exception:
                 pass
     if QtCore:
-        for name in ("QEventLoop", "QCoreApplication"):
-            cls = getattr(QtCore, name, None)
-            if cls and hasattr(cls, "exec") and not hasattr(cls, "exec_"):
-                try:
-                    setattr(cls, "exec_", _exec_wrapper)
-                except Exception:
-                    pass
+        cls = getattr(QtCore, "QEventLoop", None)
+        if cls and hasattr(cls, "exec") and not hasattr(cls, "exec_"):
+            try:
+                setattr(cls, "exec_", _exec_wrapper)
+            except Exception:
+                pass
+
+    # PySide6 retains instance-only exec_ aliases on application classes.
+    # Replace those too, so both class and instance calls use static exec().
+    for module, name in ((QtCore, "QCoreApplication"),
+                         (QtGui, "QGuiApplication"),
+                         (QtWidgets, "QApplication")):
+        cls = getattr(module, name, None)
+        if cls and hasattr(cls, "exec"):
+            try:
+                setattr(cls, "exec_", staticmethod(cls.exec))
+            except Exception:
+                pass
 
     if not hasattr(QtCore, "QSignalTransition"):
         try:
@@ -2738,6 +2749,16 @@ def ensure_binding():
     return QT_API
 
 
+def minimum_ui_scale():
+    """Return a safe UI scale minimum for the active Qt runtime.
+
+    Before Qt 6.7, QPainter clamps device pixel ratios below one. A smaller
+    global scale can therefore clip widgets when moving to a 100% display.
+    """
+    version = tuple(int(part) for part in QtCore.qVersion().split(".")[:2])
+    return 0.5 if version >= (6, 7) else 1.0
+
+
 def __getattr__(name):
     """Lazy attribute forwarding so `from qt_api import QIcon` works."""
     global QSignalTransition, QState, QStateMachine
@@ -2819,6 +2840,7 @@ __all__ = [
     "PYQT_VERSION_STR",
     "BINDING_VERSION_STR",
     "ensure_binding",
+    "minimum_ui_scale",
     "load_ui",
     "unwrapinstance",
     "wrapinstance",

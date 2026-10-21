@@ -44,6 +44,7 @@ from qt_api import QAbstractItemView
 from classes import updates
 from classes import info
 from classes.image_types import get_media_type
+from classes.path_utils import media_paths_equal
 from classes.query import File
 from classes.logger import log
 from classes.app import get_app
@@ -257,11 +258,21 @@ class FilesModel(QObject, updates.UpdateInterface):
             return tooltip
 
         state = proxy_service.get_proxy_state(file)
-        if state == "ready":
-            return "{} {}".format(tooltip, app._tr("(Optimized)"))
-        if state == "missing":
-            return "{} {}".format(tooltip, app._tr("(Optimized)"))
-        return tooltip
+        _ = app._tr
+        if state == "queued":
+            status = _("Queued for optimization")
+        elif state == "running":
+            job = proxy_service.get_active_job_for_file(file.id) or {}
+            status = _("Optimizing for smoother playback — {}%").format(job.get("progress", 0))
+        elif state == "canceling":
+            status = _("Canceling optimization")
+        elif state == "ready":
+            status = _("Optimized for smoother playback")
+        elif state == "missing":
+            status = _("Optimized preview missing")
+        else:
+            return tooltip
+        return "{}\n{}".format(tooltip, status)
 
     # This method is invoked by the UpdateManager each time a change happens (i.e UpdateInterface)
     def changed(self, action):
@@ -275,9 +286,12 @@ class FilesModel(QObject, updates.UpdateInterface):
             elif action.type == "delete" and action.key[0].lower() == "files" and len(action.key) == 2:
                 # Delete a top-level file row only when the file object itself was deleted.
                 self.update_model(clear=False, delete_file_id=action.key[1].get('id', ''))
-            elif action.type in ("update", "delete") and action.key[0].lower() == "files":
+            elif action.type in ("update", "delete") and action.key[0].lower() == "files" and len(action.key) >= 2:
                 # Update a single file (if found)
-                self.update_model(clear=False, update_file_id=action.key[1].get('id', ''))
+                file_id = action.key[1].get('id', '')
+                self.update_model(clear=False, update_file_id=file_id)
+                # Refresh the displayed frame/name for saved range edits, including undo/redo.
+                self.update_file_thumbnail(file_id)
             else:
                 # Clear existing items. For full project loads, batch updates for faster UI rebuild.
                 self.update_model(clear=True, progressive_ui=False)
@@ -430,8 +444,11 @@ class FilesModel(QObject, updates.UpdateInterface):
         for count, filepath in enumerate(files):
             (dir_path, filename) = os.path.split(filepath)
 
-            # Check for this path in our existing project data
-            new_file = File.get(path=filepath)
+            # Split File entries share the path but represent explicit ranges.
+            # Only the full source entry should suppress a normal reimport.
+            new_file = next((file for file in File.filter()
+                             if "start" not in file.data and "end" not in file.data
+                             and media_paths_equal(file.data.get("path"), filepath)), None)
 
             # If this file is already found, exit
             if new_file:
@@ -688,6 +705,8 @@ class FilesModel(QObject, updates.UpdateInterface):
     def update_file_thumbnail(self, file_id):
         """Update/re-generate the thumbnail of a specific file"""
         file = File.get(id=file_id)
+        if not file:
+            return
         path, filename = os.path.split(file.data["path"])
         name = file.data.get("name", filename)
 

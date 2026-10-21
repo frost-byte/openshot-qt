@@ -110,16 +110,75 @@ file menu.
    * - Duplicate Title
      - Make a copy, and then edit the copied title SVG file (shown when an SVG title is selected)
 
+.. _source_preview_ref:
+
 Preview File
 ------------
-The :guilabel:`Preview File` action opens the Preview dialog for the
-selected file from :guilabel:`Project Files`. Simply double check a file to open this dialog.
+The :guilabel:`Preview File` action opens the Preview dialog for the selected file
+from :guilabel:`Project Files`. Double-click a file, or press :kbd:`Shift+2` or
+:kbd:`Alt+P` while the file list has focus. With the timeline focused, the same
+shortcut plays the selected clip from its Start point. You can also right-click
+a timeline clip and choose :guilabel:`Preview Clip`.
+Double-clicking a saved split reopens its range editor instead of read-only preview.
 
-- Playback starts automatically.
-- Loop is enabled by default.
+- Playback starts automatically when you open a preview or Split File.
+- :guilabel:`Loop` repeats playback and is enabled by default in Preview.
+- Click the speaker to mute preview audio without changing the project.
+- Click or drag the volume slider to adjust preview audio without affecting your
+  exported video. Save the project to remember this volume for all its previews.
+- Use Fit Window to size the video area to the source aspect ratio. Black bars
+  already encoded in the source remain visible.
+- Seeking during playback keeps playback running. Dragging to resize, move,
+  or draw a range pauses playback so its boundary frames can be inspected.
 - Press :kbd:`Space` to toggle play/pause.
 - Use the mouse scroll wheel to zoom in/out.
 - A :guilabel:`Reset Zoom` button appears when zoom is not 100%, and resets to 100%.
+
+Resize or maximize the window to suit your workspace. Preview and Split File
+remember your window size when you save the project.
+
+The colored bar beneath the ruler shows sections already loaded for playback.
+If playback is choppy, try a smaller window or :ref:`optimize the file <optimize_ref>`.
+
+Preview File shows playback and scrubbing controls only. Preview Clip and Split
+File add range editing below the shared preview. The source ruler and filmstrip
+show the full recording, with the selected range highlighted. Drag either grip to adjust the range and
+move the playhead with it. Drag on the ruler above the filmstrip to scrub without
+changing the range.
+Edit the Start and End timecodes for precise boundaries, or click the adjacent
+clock button to use the current playhead position (:kbd:`I` / :kbd:`O`).
+End is the last included frame; a one-frame range is valid. Duration shows the
+length of the selected range and can be edited to move End while keeping Start
+fixed. Duration is limited to at least one frame and at most the remaining source
+length. The buttons beside Play jump to Start and End.
+
+When editing a timeline clip, :guilabel:`Update Clip` updates only that clip.
+Its position stays fixed and its duration changes; neighboring clips do not move.
+Locked or retimed clips can be previewed, but range application is disabled.
+:guilabel:`Reset` reloads the saved range. Each update is one undo step.
+
+Split File provides Start, End, Duration, and an optional Name beside
+:guilabel:`Create`. Each click creates one Project Files entry and
+leaves the window open to create another. Pressing :kbd:`Enter` in Name or
+outside the time fields saves and closes the editor. In Start, End, or Duration,
+Enter commits the value and keeps the editor open. Tab moves
+through Start, End, Duration, and Name; Shift+Tab reverses the order. Each
+creation is one undo step.
+Opening an existing split lets you update its range and name without changing
+existing timeline clips. :guilabel:`Update` saves the split and closes its editor,
+refreshing the file and dependent clip thumbnails. :guilabel:`Update Clip` saves
+and closes clip preview.
+Use the window close control or :kbd:`Esc` to close without applying changes.
+
+Drag a filmstrip handle to trim, drag inside the selection to move it, or drag
+outside it to draw a new range. Click to seek, or drag on the ruler to scrub
+without changing the range.
+
+If a modified range changes elsewhere in the project, discard its local changes
+and reload it before saving. The dialog remains attached to its original source
+or timeline clip when the main-window selection changes.
+
+.. _optimize_ref:
 
 Optimize
 --------
@@ -127,6 +186,93 @@ Optimized preview files are lower-resolution copies of your source video files (
 used to improve editing responsiveness without changing the original media. They are especially helpful with large
 formats such as 4K, high frame rate, or high bitrate footage.
 
+Automatic optimization
+^^^^^^^^^^^^^^^^^^^^^^
+When OpenShot creates a video's first thumbnail, it records how long the first frame
+takes to produce. This uses work already needed to display the video in Project Files;
+there is no separate decoding test. Videos whose thumbnail frame takes longer than the
+:guilabel:`Auto-Optimize Threshold` may benefit from smaller preview copies.
+
+With the default :guilabel:`Ask` preference, a banner appears when OpenShot finds a
+qualifying video in a project that does not yet have a saved choice:
+
+    **Optimize videos for smoother playback?** Originals and export quality stay unchanged.
+
+Click :guilabel:`Optimize Automatically` to enable automatic optimization for the current
+project. The banner disappears immediately, and qualifying videos are added to the
+optimization queue. Videos you import later also join the queue when they qualify,
+even if another video is already being optimized. You are not asked again for each file.
+
+You can continue editing while optimization runs. There is no progress banner; progress
+appears on the files in Project Files instead.
+
+Click :guilabel:`Not Now` or close the banner to decline. OpenShot remembers your choice
+when you save the project, so reopening it or importing more videos does not repeat the
+suggestion. To change your choice, check or uncheck :menuselection:`File --> Auto-Optimize`
+or press :kbd:`Ctrl+Alt+O` (:kbd:`Command+Alt+O` on macOS). Customize this shortcut in
+:menuselection:`Edit --> Preferences --> Keyboard`.
+Turning it off stops new automatic work; jobs already started can be canceled through
+the file's :guilabel:`Optimize` submenu. Existing optimized copies remain available.
+
+In :menuselection:`Edit --> Preferences`, open the :guilabel:`Optimize` tab (see
+:ref:`preferences_optimize_ref`):
+
+* :guilabel:`Auto-Optimize`: :guilabel:`Ask` shows the banner and is the default.
+  :guilabel:`Always` optimizes qualifying videos without a banner. :guilabel:`Never`
+  disables suggestions and automatic processing. These defaults apply to projects
+  without a saved choice; a project's own setting takes precedence.
+* :guilabel:`Auto-Optimize Threshold`: defaults to **200 ms**. Lower values include
+  more videos; higher values include fewer. This measures producing the first
+  thumbnail frame, not opening the file, saving the thumbnail, or waiting in a queue.
+* :guilabel:`Optimized Preview Resolution` and :guilabel:`Concurrent Optimize Jobs`
+  control the preview copies and how many videos can be processed at once.
+
+Thumbnail timing is saved with each file in the project. OpenShot reuses a valid timing
+when you reopen the project on the same computer. A changed source file or a different
+computer needs a new measurement. When opening older projects, OpenShot refreshes missing
+timings in the background, one small thumbnail at a time, checking videos used on the
+timeline first. New checks pause during playback. Slow videos trigger the same banner;
+accepting it also checks and queues the remaining videos. Enabling
+:guilabel:`File → Auto-Optimize` starts these checks too. Choosing :guilabel:`Never`
+or dismissing the banner stops further checks for that project. Save the project to
+keep its timings for next time. You can always optimize videos manually.
+
+The threshold is a guide, not a guarantee of playback performance. Other applications
+can affect timing, and effects or overlapping clips can slow playback independently of
+the source video. Optimized copies use additional disk space in the project's assets
+folder; original files and export quality stay unchanged. Canceled or failed automatic
+jobs are not automatically retried during the current project session.
+
+Closing OpenShot cancels queued and running optimization jobs. Active jobs finish their
+current processing step before closing, and unfinished preview files are removed.
+
+Optimization status
+^^^^^^^^^^^^^^^^^^^
+Hover over a file in Project Files to see its filename followed by a brief status:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 45 55
+
+   * - Tooltip status
+     - Meaning
+   * - Queued for optimization
+     - Waiting for an available optimization job slot.
+   * - Optimizing for smoother playback — 35%
+     - Creating a preview copy. The percentage shows progress.
+   * - Optimized for smoother playback
+     - The preview copy is ready to use.
+   * - Canceling optimization
+     - Stopping the current job and cleaning up the unfinished copy.
+   * - Optimized preview missing
+     - The linked preview copy cannot be found. Recreate it with Optimize Video or link an existing copy.
+
+To stop a queued or running job, right-click the file and choose
+:menuselection:`Optimize --> Cancel`. Canceling a job does not turn off
+:menuselection:`File --> Auto-Optimize` for later imports.
+
+Manual optimization
+^^^^^^^^^^^^^^^^^^^
 For video files, the file context menu includes an :guilabel:`Optimize` submenu. This feature creates or links
 smaller preview copies of your source clips, which can improve playback and scrubbing on slower systems or with
 high-resolution footage. Optimizing also pre-loads thumbnails to further improve the editing smoothness when
@@ -168,24 +314,24 @@ suffixes such as ``_final`` or ``_reviewcopy``, because OpenShot does not treat 
 
 Split File
 ----------
-If you need to cut a large video file into many smaller files before editing, the **Split File** dialog is built exactly for this
-purpose. Right click on a file, and choose :guilabel:`Split File`. Use this dialog to quickly separate a large file into
-many smaller segments. For each segment, you can select the starting and ending frame, and a title. Each segment appears
-as a new file in the Project Files dialog.
+Use **Split File** to choose the parts of a longer recording you want to work with. Right click a file
+in **Project Files** and choose :guilabel:`Split File`. Select the start and end of a segment, give it an
+optional name, and click :guilabel:`Create`. Adjust the markers and repeat
+to prepare as many segments as you need.
 
-.. image:: images/file-split-dialog.jpg
+Each segment appears in Project Files and can be added to the timeline like any other file. The segments
+all use the original media on disk, so you can prepare them without making extra copies of the recording.
 
-.. table::
-   :widths: 5 20 80
+When you add a segment to the timeline, OpenShot gives its properties starting keyframes at the segment's
+beginning. For example, with :ref:`auto_keyframes_ref` on, you can move to the end and change the rotation
+to make it turn over the length of that segment. The animation starts from the part you chose to use.
 
-   ==  ==================  ============
-   #   Name                Description
-   ==  ==================  ============
-   1   Start of File       Choose the starting frame of your file by clicking this button
-   2   End of File         Choose the ending frame of your file by clicking this button
-   3   Name of File        Enter an optional name
-   4   Create Button       Create the file (which resets this dialog, so you can repeat these steps for each segment)
-   ==  ==================  ============
+If you have already animated a timeline clip, slicing it preserves that animation through the cut.
+Split File is useful for choosing your segments before you begin that work.
+
+Preview an existing split-file entry to adjust its saved IN/OUT range. The ruler
+includes the surrounding footage, allowing you to extend the range again without
+reimporting the source.
 
 Please refer to the section :ref:`clips_cutting_slicing_ref` for more ways to cut and slice clips directly in the timeline.
 
@@ -249,7 +395,12 @@ This will launch the file properties dialog, which displays information about yo
 Remove from Project
 -------------------
 
-This will remove a file from the project. It will not delete the underlying physical file though, so removing a file from the project merely makes it unavailable for this video project.
+Removing an entry from **Project Files** does not delete the source media from disk.
+
+You can import the file again whenever you need it. For example, after preparing several
+:ref:`Split File segments <split_clip_ref>` and removing the original from Project Files, you might want
+to use a different part of the recording. Import it again to work with the whole recording; your existing
+segments stay as they are. If the original is already in Project Files, importing it again selects it.
 
 .. _project_assets_folder_ref:
 

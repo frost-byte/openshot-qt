@@ -71,6 +71,20 @@ class ProjectDataStore(JsonDataStore, UpdateInterface):
         # Load default project data on creation
         self.new()
 
+    def read_from_file(self, file_path, path_mode="ignore"):
+        """Import waveform assets and migrate legacy arrays before project copies."""
+        from classes.waveform_cache import externalize, transfer
+        data = super().read_from_file(file_path, path_mode)
+        transfer(data, os.path.join(get_assets_path(file_path, create_paths=False), "waveforms"), importing=True)
+        return externalize(data)
+
+    def write_to_file(self, file_path, data, path_mode="ignore", previous_path=None):
+        """Save waveform assets before writing references into project JSON."""
+        from classes.waveform_cache import externalize, transfer
+        externalize(data)
+        transfer(data, os.path.join(get_assets_path(file_path, create_paths=False), "waveforms"))
+        return super().write_to_file(file_path, data, path_mode, previous_path)
+
     def needs_save(self):
         """Returns if project data has unsaved changes"""
         return self.has_unsaved_changes
@@ -357,6 +371,7 @@ class ProjectDataStore(JsonDataStore, UpdateInterface):
             self._data = self.read_from_file(self.default_project_filepath)
             self.apply_default_track_count()
 
+        self._data.setdefault("auto_optimize", None)
         self.current_filepath = None
         self.has_unsaved_changes = False
 
@@ -443,6 +458,14 @@ class ProjectDataStore(JsonDataStore, UpdateInterface):
                     # This exception occurs when there's a problem parsing the Profile file - display a message and continue
                     log.error("Failed to parse file '%s' as a profile: %s" % (profile_path, e))
 
+        # Portable custom profiles travel with the project, not a machine-local
+        # profile file. Installed/legacy profiles retain their existing lookup.
+        embedded = self._data.get("profile_settings") or {}
+        if not profile and embedded.get("description") == profile_desc:
+            custom = openshot.Profile()
+            custom.SetJson(json.dumps(embedded))
+            profile = self.apply_profile(custom)
+
         # Upgrade a legacy profile (if needed). Sometimes legacy profiles do match a new profile description, so
         # only upgrade if we have not already found a profile matching the description
         if not profile and legacy_profile_match:
@@ -455,6 +478,7 @@ class ProjectDataStore(JsonDataStore, UpdateInterface):
         log.info("Setting profile to %s" % profile.info.description)
 
         # Update default profile
+        self._data["profile_settings"] = json.loads(profile.Json())
         self._data["profile"] = profile.info.description
         self._data["width"] = profile.info.width
         self._data["height"] = profile.info.height
@@ -467,9 +491,26 @@ class ProjectDataStore(JsonDataStore, UpdateInterface):
 
         return profile
 
-    def load(self, file_path, clear_thumbnails=True):
+    def load(self, file_path, clear_thumbnails=True, interactive=True):
         """ Load project from file """
 
+        if file_path and not interactive:
+            # Validate paths before replacing the active project; agents must never
+            # open a modal missing-file dialog or silently drop missing media.
+            candidate = self.read_from_file(file_path, path_mode="absolute")
+            def check_paths(value):
+                if isinstance(value, dict):
+                    self._drop_obsolete_effect_resource(value)
+                    for key, child in value.items():
+                        if key in ("path", "resource", "protobuf_data_path", "lut_path") and isinstance(child, str) and child and "%" not in child:
+                            if not os.path.exists(child):
+                                raise FileNotFoundError("Missing project asset: " + child)
+                        elif key != "history":
+                            check_paths(child)
+                elif isinstance(value, list):
+                    for child in value:
+                        check_paths(child)
+            check_paths(candidate)
         self.new()
 
         if file_path:
@@ -480,18 +521,20 @@ class ProjectDataStore(JsonDataStore, UpdateInterface):
 
             try:
                 # Attempt to load v2.X project file
-                project_data = self.read_from_file(file_path, path_mode="absolute")
+                project_data = (self.read_from_file(file_path, path_mode="absolute")
+                                if interactive else candidate)
 
                 # Fix history (if broken)
                 if not project_data.get("history"):
                     project_data["history"] = {"undo": [], "redo": []}
 
                 # If project has waveforms, enable removing waveforms
-                get_app().window.actionClearWaveformData.setEnabled(False)
-                for file in project_data["files"]:
-                    if file.get("ui",{}).get("audio_data", []):
-                        get_app().window.actionClearWaveformData.setEnabled(True)
-                        break
+                if get_app().window:
+                    get_app().window.actionClearWaveformData.setEnabled(False)
+                    for file in project_data["files"]:
+                        if file.get("ui",{}).get("audio_data", []):
+                            get_app().window.actionClearWaveformData.setEnabled(True)
+                            break
 
             except Exception:
                 try:
@@ -535,7 +578,8 @@ class ProjectDataStore(JsonDataStore, UpdateInterface):
             self.has_unsaved_changes = False
 
             # Check if paths are all valid
-            self.check_if_paths_are_valid()
+            if interactive:
+                self.check_if_paths_are_valid()
 
             # Clear old thumbnails
             openshot_thumbnails = info.get_default_path("THUMBNAIL_PATH")
@@ -1035,6 +1079,7 @@ class ProjectDataStore(JsonDataStore, UpdateInterface):
         import openshot
 
         log.info("Saving project file: %s", file_path)
+        self._restore_clip_file_references()
 
         # Move all temp files (i.e. Blender Animations, Titles, Thumbnails, Protobuf files) to the project folder
         if not backup_only:
@@ -1535,12 +1580,53 @@ class ProjectDataStore(JsonDataStore, UpdateInterface):
         s.set("recent_projects", recent_projects)
         s.save()
 
+    def _restore_clip_file_references(self):
+        """Recover orphaned media references before saving or validating paths.
+
+        Clips contain a full reader even when their Project Files entry is
+        absent. Reuse a matching file, or restore that entry from the reader,
+        so path validation can locate missing media instead of deleting a
+        playable clip just because its file ID is unknown.
+        """
+        files = self._data.setdefault("files", [])
+        by_id = {file.get("id"): file for file in files}
+        by_path = {comparable_local_path(file.get("path")): file for file in files
+                   if file.get("path")}
+        for clip in self._data.get("clips", []):
+            reader = clip.get("reader")
+            if not isinstance(reader, dict):
+                continue
+            file_id = clip.get("file_id") or reader.get("id")
+            path = reader.get("path")
+            if not file_id or file_id in by_id or not path:
+                continue
+            file = by_path.get(comparable_local_path(path))
+            if file is None:
+                file = copy.deepcopy(reader)
+                file["id"] = file_id
+                if not file.get("media_type"):
+                    file["media_type"] = get_media_type(dict(
+                        file, has_video=file.get("has_video", True),
+                        has_audio=file.get("has_audio", False)))
+                file["image"] = clip.get("image") or os.path.join(
+                    info.THUMBNAIL_PATH, "%s.png" % file_id)
+                files.append(file)
+                by_id[file_id] = file
+                by_path[comparable_local_path(path)] = file
+                log.warning("Restored missing project file %s from clip %s", file_id, clip.get("id"))
+            clip["file_id"] = file["id"]
+            reader["id"] = file["id"]
+            if file.get("image"):
+                clip["image"] = file["image"]
+
     def check_if_paths_are_valid(self):
         """Check if all paths are valid, and prompt to update them if needed"""
         app = get_app()
         settings = app.get_settings()
         # Get translation method
         _ = app._tr
+
+        self._restore_clip_file_references()
 
         log.info("checking project files...")
         prompt_state = {"cancelled": False, "missing_path_decisions": {}}
@@ -1757,7 +1843,14 @@ class ProjectDataStore(JsonDataStore, UpdateInterface):
             if len(action.key) == 1 and action.key[0] in ["fps"]:
                 # FPS changed (apply profile)
                 profile_key = self._data.get("profile")
-                profile = self.get_profile(profile_key)
+                if updates._is_processing_history:
+                    # Undo reverses FPS before the profile-name action. Looking
+                    # up the still-new name here would overwrite the restored
+                    # FPS and make undo silently retain the new frame rate.
+                    profile = openshot.Profile()
+                    profile.SetJson(json.dumps(dict(self._data, description=profile_key)))
+                else:
+                    profile = self.get_profile(profile_key)
                 if profile:
                     # Get current FPS (prior to changing)
                     new_fps = self._data.get("fps")

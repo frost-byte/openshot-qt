@@ -37,6 +37,7 @@ Table of Contents:
    quick_tutorial
    getting_started
    main_window
+   keyboard
    timeline
    recording
    files
@@ -53,6 +54,7 @@ Table of Contents:
    playback
    ai
    troubleshoot
+   agent_cli
    developers
    contributing
    learn_more

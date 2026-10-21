@@ -4,7 +4,7 @@ import types
 import unittest
 import json
 import threading
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from qt_api import QRect, QSize, QDialog, QObject, Qt, Signal
 from qt_api import QApplication
@@ -84,6 +84,46 @@ class DummyFraction:
 
 
 class DialogPreviewResizeTests(unittest.TestCase):
+    def test_application_exit_waits_for_preview_before_finalizing(self):
+        for already_stopping in (False, True):
+            with self.subTest(already_stopping=already_stopping):
+                calls = []
+                background = MagicMock()
+                background.isRunning.return_value = True
+                parent = MagicMock(background=background)
+                parent.Stop.side_effect = lambda **kwargs: calls.append(("stop", kwargs))
+                window = types.SimpleNamespace(
+                    _shutdown_in_progress=already_stopping,
+                    _close_after_shutdown=False,
+                    preview_thread=object(),
+                    preview_parent=parent,
+                    PauseSignal=DummySignal(),
+                    StopSignal=DummySignal(),
+                    _on_preview_stopped=lambda: calls.append(("finalize", {})),
+                )
+                Cutting._shutdown_preview(window, close_dialog=True, wait_for_thread=True)
+                self.assertEqual(calls, [("stop", {"wait_for_thread": True}), ("finalize", {})])
+                self.assertTrue(window._close_after_shutdown)
+                background.finished.disconnect.assert_called_once()
+                background.finished.connect.assert_not_called()
+
+    def test_normal_preview_close_remains_asynchronous(self):
+        background = MagicMock()
+        background.isRunning.return_value = True
+        parent = MagicMock(background=background)
+        window = types.SimpleNamespace(
+            _shutdown_in_progress=False,
+            _close_after_shutdown=False,
+            preview_thread=object(),
+            preview_parent=parent,
+            PauseSignal=DummySignal(),
+            StopSignal=DummySignal(),
+            _on_preview_stopped=MagicMock(),
+        )
+        Cutting._shutdown_preview(window, close_dialog=True)
+        parent.Stop.assert_called_once_with(wait_for_thread=False)
+        window._on_preview_stopped.assert_not_called()
+
     def test_standalone_preview_ignores_project_refresh(self):
         # Cutting and SelectRegion replace VideoWidget.win with their dialog,
         # but the widget still receives the main window's refresh signal.
@@ -164,21 +204,22 @@ class DialogPreviewResizeTests(unittest.TestCase):
             VideoWidget.delayed_resize_callback(fake)
         self.assertEqual(sizes, [QSize(639, 353)])
 
-    def test_cutting_preview_window_title_prefers_friendly_name(self):
-        title = Cutting._preview_window_title(
-            types.SimpleNamespace(data={"name": "My Friendly File", "path": os.path.join(TEST_MEDIA_ROOT, "raw-name.mp4")}),
-            lambda text: text,
-        )
+    def test_source_preview_titles(self):
+        from windows.preview_design import source_preview_title
+        for mode, label in [('preview', 'Preview File'), ('create', 'Split File'),
+                            ('file', 'Preview Split File'), ('clip', 'Preview Clip')]:
+            self.assertEqual(source_preview_title(mode, '', str), label)
+            for name in ('Interview.mp4', 'Opening shot', '00:12–00:18'):
+                self.assertEqual(source_preview_title(mode, name, str), label + ': ' + name)
+        name = 'Conference-recording-' + 'x' * 100 + '-camera-02.mp4'
+        title = source_preview_title('preview', name, str)
+        self.assertTrue(title.startswith('Preview File: Conference-recording-'))
+        self.assertTrue(title.endswith('-camera-02.mp4'))
+        self.assertEqual(len(title.split(': ', 1)[1]), 56)
 
-        self.assertEqual(title, "Preview: My Friendly File")
-
-    def test_cutting_preview_window_title_falls_back_to_plain_preview(self):
-        title = Cutting._preview_window_title(
-            types.SimpleNamespace(data={"name": "", "path": ""}),
-            lambda text: text,
-        )
-
-        self.assertEqual(title, "Preview")
+    def test_playback_does_not_replace_source_dialog_title(self):
+        fake = types.SimpleNamespace(win=types.SimpleNamespace(range_mode='clip'))
+        VideoWidget.update_title(fake)
 
     def test_cutting_select_reader_data_uses_proxy_when_target_fits(self):
         proxy = {"path": "/proxy.mp4", "width": 1280, "height": 720}
@@ -256,6 +297,7 @@ class DialogPreviewResizeTests(unittest.TestCase):
         )
         fake = types.SimpleNamespace(
             initialized=True,
+            videoPreview=object(),
             r=timeline,
             _target_preview_max_size=lambda: QSize(640, 360),
             _select_reader_data_for_size=lambda size: {"path": "/source.mp4"},
@@ -284,6 +326,7 @@ class DialogPreviewResizeTests(unittest.TestCase):
         )
         fake = types.SimpleNamespace(
             initialized=True,
+            videoPreview=object(),
             r=timeline,
             preview_thread=types.SimpleNamespace(player=player),
             _target_preview_max_size=lambda: QSize(640, 360),
@@ -314,6 +357,73 @@ class DialogPreviewResizeTests(unittest.TestCase):
         Cutting._preview_ready(fake)
 
         self.assertEqual(seek_calls, [(1, False)])
+
+    def test_split_file_autoplay_starts_when_ready(self):
+        fake = types.SimpleNamespace(
+            is_preview_mode=False, _preview_autoplay_active=True,
+            initialized=True, preview_thread=object(),
+            _preview_autoplay_attempts=0, btnPlay_clicked=MagicMock())
+        with patch('windows.cutting.QTimer.singleShot') as timer:
+            Cutting._start_preview_autoplay(fake)
+        fake.btnPlay_clicked.assert_called_once_with(force='play')
+        self.assertEqual(fake._preview_autoplay_attempts, 1)
+        timer.assert_called_once()
+
+    def test_preview_resize_ignores_destroyed_video_widget(self):
+        fake = types.SimpleNamespace(initialized=True, r=object(), videoPreview=None,
+                                     _target_preview_max_size=MagicMock())
+        Cutting._apply_dynamic_preview_max_size(fake)
+        fake._target_preview_max_size.assert_not_called()
+
+    def test_preview_autoplay_does_not_restart_a_closing_dialog(self):
+        fake = types.SimpleNamespace(
+            is_preview_mode=True, _preview_autoplay_active=True,
+            _shutdown_in_progress=True, initialized=False,
+            btnPlay_clicked=MagicMock())
+        with patch('windows.cutting.QTimer.singleShot') as timer:
+            Cutting._start_preview_autoplay(fake)
+        timer.assert_not_called()
+        fake.btnPlay_clicked.assert_not_called()
+
+    def test_timeline_source_preview_autoplays_from_in_point_after_worker_startup(self):
+        from qt_api import QSlider
+        slider = QSlider()
+        slider.setRange(1, 240)
+        fake = types.SimpleNamespace(
+            is_preview_mode=True, initialized=True, previous_start=2.0, fps=24,
+            video_length=240, sliderVideo=slider, sliderIgnoreSignal=False,
+            _preview_autoplay_active=True, btnPlay_clicked=MagicMock(),
+            preview_thread=types.SimpleNamespace(Seek=MagicMock()), SeekSignal=DummySignal())
+        fake._preview_ready = lambda: Cutting._preview_ready(fake)
+        fake._start_preview_autoplay = MagicMock()
+        for seconds, expected in ((3.5, 37), (0, 1), (100, 240)):
+            with patch('windows.cutting.QTimer.singleShot') as timer:
+                Cutting.preview_source_at(fake, seconds)
+            self.assertTrue(fake._preview_autoplay_active)
+            self.assertEqual(fake._preview_autoplay_attempts, 0)
+            timer.assert_called_once_with(0, fake._start_preview_autoplay)
+            self.assertEqual(slider.value(), expected)
+            fake.btnPlay_clicked.assert_called_with(force='pause')
+            fake.preview_thread.Seek.assert_called_with(expected, False)
+            # A queued ready signal must retain the requested frame and autoplay.
+            with patch('windows.cutting.QTimer.singleShot') as timer:
+                Cutting._preview_ready(fake)
+            timer.assert_called_once_with(0, fake._start_preview_autoplay)
+            fake.preview_thread.Seek.assert_called_with(expected, False)
+        self.assertFalse(fake.sliderIgnoreSignal)
+
+    def test_source_play_starts_inside_loop_range(self):
+        fake = types.SimpleNamespace(
+            _preview_autoplay_active=False, btnPlay=MagicMock(),
+            _source_control_icon=MagicMock(),
+            loop_playback=True, playback_range=lambda: (31, 36),
+            sliderVideo=MagicMock(), SeekSignal=MagicMock(), PlaySignal=MagicMock())
+        fake.btnPlay.isChecked.return_value = True
+        fake.sliderVideo.value.return_value = 80
+        Cutting.btnPlay_clicked(fake, force='play')
+        fake.SeekSignal.emit.assert_called_once_with(31)
+        fake.PlaySignal.emit.assert_called_once()
+        fake.sliderVideo.setFocus.assert_not_called()
 
     def test_player_worker_play_honors_pending_seek_preroll_flag(self):
         applied = []
@@ -450,7 +560,7 @@ class DialogPreviewResizeTests(unittest.TestCase):
             info = FakeClipReaderInfo()
 
         class FakeClip:
-            def __init__(self, path):
+            def __init__(self, path=None):
                 self.path = path
                 self.reader = FakeClipReader()
                 self.display = None
@@ -491,12 +601,13 @@ class DialogPreviewResizeTests(unittest.TestCase):
         }.get(key, 0)))
 
         with patch("windows.cutting.openshot.Timeline", FakeTimeline), \
-             patch("windows.cutting.openshot.Clip", FakeClip), \
+             patch("windows.cutting.openshot.Clip", side_effect=FakeClip) as create_clip, \
              patch("windows.cutting.openshot.Fraction", DummyFraction), \
              patch("windows.cutting.openshot.FRAME_DISPLAY_CLIP", 7), \
              patch("windows.cutting.get_app", return_value=fake_app):
             Cutting._build_preview_timeline(fake, {"path": "/source.mp4"}, QSize(640, 360))
 
+        create_clip.assert_called_once_with()
         self.assertEqual(timeline_args[0][0:2], (3840, 2160))
         self.assertEqual(timeline_args[0][3:6], (44100, 2, 3))
         self.assertEqual(timeline_setmax, [(640, 360)])
@@ -531,7 +642,7 @@ class DialogPreviewResizeTests(unittest.TestCase):
             info = FakeClipReaderInfo()
 
         class FakeClip:
-            def __init__(self, path):
+            def __init__(self, path=None):
                 self.path = path
                 self.reader = FakeClipReader()
                 self.display = None

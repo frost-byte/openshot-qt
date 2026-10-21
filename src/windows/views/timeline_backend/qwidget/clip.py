@@ -29,11 +29,11 @@ import json
 import time
 import uuid
 from qt_api import Qt, QRectF, QPointF
-from qt_api import QApplication
+from qt_api import QApplication, QCursor
 from classes.app import get_app
-from classes.feedback import record_feedback_changes
 from classes.clip_utils import is_single_image_media
 from classes.query import Clip, Transition
+from classes.waveform_cache import sample_count, is_reference
 from classes.waveform import waveform_sample_rate
 from windows.views.retime import retime_clip
 
@@ -279,6 +279,19 @@ class ClipInteractionMixin:
         )
         return True
 
+    def _commit_resized_transition(self, transition, start, end, position, context,
+                                   transaction_id, ignore_refresh):
+        """Share transition timing and mask updates between mouse and keyboard trims."""
+        data = json.loads(json.dumps(transition.data))
+        start, end, position = self._normalize_resize_commit_bounds(start, end, position)
+        data.update(position=position, start=start, end=end,
+                    duration=self._snap_time(end - start),
+                    _auto_direction=bool(context.get("static_mask")))
+        self.update_transition_data(data, only_basic_props=True,
+                                    ignore_refresh=ignore_refresh, transaction_id=transaction_id)
+        transition.data = data
+        return True
+
     def _active_resize_items(self):
         """Return the items currently participating in an edge resize gesture."""
         if getattr(self, "_press_hit", "") != "clip-edge":
@@ -391,10 +404,10 @@ class ClipInteractionMixin:
         ui_data = data.get("ui", {}) if isinstance(data, dict) else {}
         samples_per_second = waveform_sample_rate(ui_data)
         audio_data = ui_data.get("audio_data") if isinstance(ui_data, dict) else None
-        sample_count = len(audio_data) if isinstance(audio_data, list) else 0
+        count = sample_count(audio_data)
         media_duration = 0.0
-        if sample_count:
-            media_duration = float(sample_count) / float(samples_per_second)
+        if count:
+            media_duration = float(count) / float(samples_per_second)
 
         if media_duration <= 0.0:
             media_duration = max(initial_end, pending_end, end, start, 0.0)
@@ -440,12 +453,13 @@ class ClipInteractionMixin:
         data = clip.data if isinstance(clip.data, dict) else {}
         ui_data = data.get("ui", {}) if isinstance(data, dict) else {}
         audio_data = ui_data.get("audio_data") if isinstance(ui_data, dict) else None
-        if isinstance(audio_data, list):
+        if isinstance(audio_data, list) or is_reference(audio_data):
             rms_data = ui_data.get("audio_data_rms")
             return (
-                len(audio_data),
-                len(rms_data) if isinstance(rms_data, list) else 0,
-                ui_data.get("waveform_token"),
+                sample_count(audio_data),
+                sample_count(rms_data),
+                rms_data.get("waveform_cache") if is_reference(rms_data) else None,
+                audio_data.get("waveform_cache") if is_reference(audio_data) else ui_data.get("waveform_token"),
                 ui_data.get("audio_data_format"),
                 ui_data.get("audio_data_rate"),
             )
@@ -1124,20 +1138,81 @@ class ClipInteractionMixin:
             pass
 
     def _startProjectResize(self):
+        # Duration resizing can also change zoom; keep thumbnail tiles attached
+        # to their clips, including the deferred paint after releasing the mouse.
+        self._thumbnail_zoom_with_clip = True
         self._fix_cursor(self.cursors.get("resize_x", Qt.SizeHorCursor))
         self._project_resize_initial_duration = self._current_project_duration()
+        event = self._last_event
+        self._project_resize_start_x = (
+            event.position().x() if hasattr(event, "position") else event.pos().x()
+        )
+        self._project_resize_initial_zoom = self.zoom_factor
+        self._project_resize_pixels_per_second = self.pixels_per_second
+        self._project_resize_extra_seconds = 0.0
+        self._project_resize_edge_since = None
+        self._project_resize_tick_time = time.monotonic()
         min_duration = self._furthest_timeline_edge()
         if self.fps_float > 0:
             min_duration = max(min_duration, 1.0 / self.fps_float)
         self._project_resize_min_duration = max(0.0, min_duration)
         self._project_resize_keep_right = self._is_view_right_aligned()
         self._set_project_duration_override(self._project_resize_initial_duration)
+        self._project_resize_timer.start()
 
-    def _projectResizeMove(self):
-        event = self._last_event
-        if not event:
+    def _projectResizeEdgeTick(self):
+        """Continue a held resize at the viewport or physical screen edge."""
+        if self._project_duration_override is None:
+            self._project_resize_timer.stop()
             return
-        new_duration = self._seconds_from_x(event.position().x() if hasattr(event, "position") else event.pos().x())
+        now = time.monotonic()
+        elapsed = min(0.1, max(0.0, now - self._project_resize_tick_time))
+        self._project_resize_tick_time = now
+        if not (QApplication.mouseButtons() & Qt.LeftButton):
+            self._project_resize_timer.stop()
+            return
+        global_pos = QCursor.pos()
+        pointer_x = self.mapFromGlobal(global_pos).x()
+        # Holding near the edge must not turn a stationary or leftward drag
+        # into expansion. Returning to the starting point also resets the dwell.
+        if pointer_x <= self._project_resize_start_x:
+            self._project_resize_edge_since = None
+            return
+        right = self.width() - self.scroll_bar_thickness
+        screen = QApplication.screenAt(global_pos)
+        if screen is not None:
+            screen_right = self.mapFromGlobal(screen.geometry().topRight()).x()
+            right = min(right, screen_right)
+        edge_zone = 24.0
+        penetration = max(0.0, min(1.0, (pointer_x - (right - edge_zone)) / edge_zone))
+        if penetration <= 0.0:
+            self._project_resize_edge_since = None
+            return
+        if self._project_resize_edge_since is None:
+            self._project_resize_edge_since = now
+        if now - self._project_resize_edge_since < 0.35:
+            return
+        pps = self._project_resize_pixels_per_second
+        if pps <= 0.0:
+            return
+        self._project_resize_extra_seconds += 240.0 * penetration * elapsed / pps
+        self._project_resize_keep_right = True
+        self._projectResizeMove(pointer_x)
+
+    def _projectResizeMove(self, pointer_x=None):
+        if pointer_x is None:
+            event = self._last_event
+            if not event:
+                return
+            pointer_x = event.position().x() if hasattr(event, "position") else event.pos().x()
+        # Geometry can scroll as the duration changes. Measure from the original
+        # pointer position so those scroll changes cannot feed back into resizing.
+        pps = self._project_resize_pixels_per_second
+        if pps <= 0.0:
+            return
+        new_duration = self._project_resize_initial_duration + (
+            pointer_x - self._project_resize_start_x
+        ) / pps + self._project_resize_extra_seconds
         new_duration = max(self._project_resize_min_duration, new_duration)
         snapped = self._snap_time(new_duration)
         if snapped < self._project_resize_min_duration:
@@ -1147,21 +1222,23 @@ class ClipInteractionMixin:
             self._set_project_duration_override(snapped)
 
     def _finishProjectResize(self):
+        self._project_resize_timer.stop()
         final_duration = getattr(self, "_project_duration_override", None)
         if final_duration is None:
-            final_duration = self._project_resize_initial_duration
+            # Both the state exit callback and its signal can finalize a drag.
+            # Once committed, never restore the original duration on a second call.
+            return
         final_duration = max(self._project_resize_min_duration, float(final_duration or 0.0))
         snapped = self._snap_time(final_duration)
         if snapped < self._project_resize_min_duration:
             snapped = self._project_resize_min_duration
+        timeline = getattr(self.win, "timeline", None)
+        if timeline and abs(snapped - self._project_resize_initial_duration) > 1e-3:
+            timeline.resizeTimeline(snapped)
         self._set_project_duration_override(None)
         self._project_resize_keep_right = False
         self._release_cursor()
-        if abs(snapped - self._project_resize_initial_duration) <= 1e-3:
-            return
-        timeline = getattr(self.win, "timeline", None)
-        if timeline:
-            timeline.resizeTimeline(snapped)
+        self._emit_zoom_signals(list(self.scrollbar_position))
 
     def _capture_resize_pointer(self, rect):
         """Preserve where the edge was grabbed within its generous hit area."""
@@ -1563,21 +1640,8 @@ class ClipInteractionMixin:
                         waveform_clips.append(candidate.id)
                 else:
                     context = resize_initial_map.get(candidate.id, {})
-                    static_mask = bool(context.get("static_mask"))
-                    transition_data = json.loads(json.dumps(candidate.data))
-                    start, end, position = self._normalize_resize_commit_bounds(start, end, position)
-                    transition_data["position"] = position
-                    transition_data["start"] = start
-                    transition_data["end"] = end
-                    transition_data["duration"] = self._snap_time(transition_data["end"] - transition_data["start"])
-                    transition_data["_auto_direction"] = static_mask
-                    self.update_transition_data(
-                        transition_data,
-                        only_basic_props=True,
-                        ignore_refresh=ignore_refresh,
-                        transaction_id=transaction_id,
-                    )
-                    candidate.data = transition_data
+                    self._commit_resized_transition(
+                        candidate, start, end, position, context, transaction_id, ignore_refresh)
 
                 if isinstance(candidate, (Clip, Transition)) and hasattr(self, "RefreshTrimmedTimelineItem"):
                     self.RefreshTrimmedTimelineItem(json.dumps(candidate.data), resize_edge)
@@ -1595,9 +1659,6 @@ class ClipInteractionMixin:
         self._update_project_duration()
         if waveform_clips and hasattr(self, "Show_Waveform_Triggered"):
             self.Show_Waveform_Triggered(waveform_clips, transaction_id=transaction_id)
-        record_feedback_changes("structure", {
-            item_id: context["initial"] for item_id, context in resize_initial_map.items()
-            if isinstance(context.get("item"), Clip)}, fields=("start", "end"))
         self._finalize_resize_preview_state(resize_items, requested_backend_refresh)
         if hasattr(self, "_refresh_keyframe_markers") and not self._dragging_panel_keyframes and not self._dragging_keyframe:
             self._refresh_keyframe_markers()

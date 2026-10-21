@@ -45,7 +45,6 @@ from qt_api import QUrl
 
 from classes import info, updates
 from classes.app import get_app
-from classes.feedback import feedback_command, record_feedback_action
 from classes.color_presets import (
     COLOR_GRADE_CLASS_NAME,
     COLOR_PRESET_AUTO_CONTRAST,
@@ -158,6 +157,7 @@ from classes.logger import log
 from classes.query import File, Clip, Transition, Track, Effect
 from classes.clipboard import ClipboardManager
 from classes.thumbnail import GetThumbPath
+from classes.waveform_cache import sample_count, is_reference
 from classes.waveform import (
     ABSOLUTE_WAVEFORM_FORMAT,
     WAVEFORM_FORMAT_KEY,
@@ -166,6 +166,7 @@ from classes.waveform import (
     get_audio_data,
 )
 from classes.path_utils import absolute_media_path
+from classes.keyframe_editing import initialize_split_clip_keyframes
 from classes.proxy_service import dialog_preview_reader_data
 from .timeline_backend.enums import (
     MenuFade, MenuRotate, MenuLayout, MenuAlign, MenuAnimate, MenuVolume,
@@ -176,6 +177,7 @@ from .timeline_backend.colors import effect_color_hex
 from .menu import StyledContextMenu, add_bound_action
 from classes.clip_utils import (
     clamp_timing_to_media,
+    fit_transition_keyframes,
     apply_file_caption_to_clip,
     is_single_image_media,
 )
@@ -432,7 +434,7 @@ class TimelineView(updates.UpdateInterface, ViewClass):
         """Check if an update payload already contains waveform samples"""
         if isinstance(value, dict):
             audio_data = value.get("audio_data")
-            if isinstance(audio_data, list) and len(audio_data) > 0:
+            if sample_count(audio_data) > 0:
                 return True
             ui_value = value.get("ui")
             if ui_value and self._payload_contains_waveform(ui_value):
@@ -453,7 +455,7 @@ class TimelineView(updates.UpdateInterface, ViewClass):
         if not clip or not isinstance(getattr(clip, "data", None), dict):
             return False
         audio_data = clip.data.get("ui", {}).get("audio_data")
-        return isinstance(audio_data, list) and len(audio_data) > 0
+        return sample_count(audio_data) > 0
 
     def _clip_volume_curve_changed(self, original_data, current_data):
         """Return True when a clip's volume keyframe payload changed."""
@@ -733,7 +735,7 @@ class TimelineView(updates.UpdateInterface, ViewClass):
             if not clip:
                 continue
             audio_data = clip.data.get("ui", {}).get("audio_data")
-            if isinstance(audio_data, list) and len(audio_data) > 0:
+            if sample_count(audio_data) > 0:
                 return True
         return False
 
@@ -742,6 +744,11 @@ class TimelineView(updates.UpdateInterface, ViewClass):
         if action is None:
             if ViewClass == TimelineWidget:
                 TimelineWidget.changed(self, None)
+            return
+
+        if action.key and action.key[0] == 'files':
+            if action.type == 'update' and len(action.key) >= 2:
+                self.invalidate_file_thumbnails(action.key[1].get('id'))
             return
 
         if ViewClass == TimelineWidget and self._pending_trim_refresh:
@@ -825,11 +832,11 @@ class TimelineView(updates.UpdateInterface, ViewClass):
             duration = max(0.0, end - start)
             furthest = max(furthest, position + duration)
 
-        min_length = 300.0
-        padding = 10.0
-        desired = max(min_length, furthest + padding)
         current = float(get_app().project.get("duration") or 0.0)
-        if desired > current + 1e-3:
+        # Respect a manually shortened timeline, including one ending exactly at
+        # the last clip. Add working room only when content exceeds its boundary.
+        if furthest > current + 1e-3:
+            desired = furthest + 10.0
             self.resizeTimeline(desired)
 
     def delete_invalid_timeline_item(self, item):
@@ -1032,29 +1039,6 @@ class TimelineView(updates.UpdateInterface, ViewClass):
                 return None
 
         return transition_size
-
-    def _scale_keyframes(self, keyframe, factor):
-        """Scale the X values of keyframe points"""
-        for point in keyframe.get("Points", []):
-            if "co" in point and "X" in point["co"] and point["co"]["X"] != 1:
-                point["co"]["X"] = round((point["co"]["X"] - 1) * factor) + 1
-
-    def _anchor_transition_endpoint_keyframes(self, transition_data, total_frames):
-        """Keep static transition endpoint keyframes anchored to the clip edges."""
-        if total_frames <= 0 or not isinstance(transition_data, dict):
-            return
-        last_frame = int(total_frames) + 1
-        for prop in ("brightness", "contrast"):
-            keyframe = transition_data.get(prop)
-            points = keyframe.get("Points") if isinstance(keyframe, dict) else None
-            if not isinstance(points, list) or len(points) < 2:
-                continue
-            first = points[0].get("co") if isinstance(points[0], dict) else None
-            last = points[-1].get("co") if isinstance(points[-1], dict) else None
-            if isinstance(first, dict):
-                first["X"] = 1
-            if isinstance(last, dict):
-                last["X"] = last_frame
 
     def _transition_mask_reader(self, transition_data, fallback_data=None):
         """Return reader metadata for a transition payload."""
@@ -1334,11 +1318,7 @@ class TimelineView(updates.UpdateInterface, ViewClass):
         fps = get_app().project.get("fps")
         fps_float = float(fps["num"]) / float(fps["den"])
 
-        # Preserve and scale existing keyframes when only basic props are updated
-        old_duration = old_data.get("end", 0.0) - old_data.get("start", 0.0)
-        new_duration = existing_item.data.get("end", 0.0) - existing_item.data.get("start", 0.0)
-        old_frames = round(old_duration * fps_float) if old_duration > 0 else 0
-        new_frames = round(new_duration * fps_float) if new_duration > 0 else 0
+        # Preserve existing animation when moving or trimming transitions.
         uses_static_mask = self._transition_uses_static_mask(existing_item.data, old_data)
 
         if old_data and only_basic_props:
@@ -1347,13 +1327,9 @@ class TimelineView(updates.UpdateInterface, ViewClass):
             if "contrast" in old_data:
                 existing_item.data["contrast"] = old_data["contrast"]
 
-            if uses_static_mask and old_frames and new_frames and old_frames != new_frames:
-                scale = new_frames / old_frames
-                for prop in ("brightness", "contrast"):
-                    if prop in existing_item.data:
-                        self._scale_keyframes(existing_item.data[prop], scale)
-            if uses_static_mask and new_frames:
-                self._anchor_transition_endpoint_keyframes(existing_item.data, new_frames)
+            if any(existing_item.data.get(key) != old_data.get(key) for key in ("start", "end")):
+                fit_transition_keyframes(existing_item.data, fps_float, old_data)
+                existing_item.data["duration"] = existing_item.data["end"] - existing_item.data["start"]
         elif old_data and self._transition_reader_changed(existing_item.data, old_data):
             self._set_transition_mask_defaults(existing_item.data, old_data)
 
@@ -2304,8 +2280,13 @@ class TimelineView(updates.UpdateInterface, ViewClass):
                 if action != copy_action and not action.isSeparator():
                     action.setEnabled(False)
 
-        # Properties
+        # Source preview and Properties remain available on locked tracks.
         menu.addSeparator()
+        if clip.data.get('file_id'):
+            preview_action = add_bound_action(
+                menu, self.window, "actionPreview_File", _("Preview Clip"),
+                callback=lambda: self.window.actionPreview_File_trigger(clip_id=clip.id))
+            preview_action.setText(_("Preview Clip"))
         add_bound_action(menu, self.window, "actionProperties", _("Properties"),
                          callback=lambda: self.window.actionProperties_trigger(timeline_anchor=properties_anchor))
 
@@ -2476,9 +2457,9 @@ class TimelineView(updates.UpdateInterface, ViewClass):
     def clipAudioDataReady_Triggered(self, clip_id, ui_data, tid):
         # When audio data has been calculated, add it to a clip
         audio_samples = ui_data.get("ui", {}).get("audio_data") if isinstance(ui_data, dict) else []
-        sample_count = len(audio_samples) if isinstance(audio_samples, list) else 0
+        count = sample_count(audio_samples)
         log.info(
-            "Waveform data ready for clip %s (samples: %s)", clip_id, sample_count
+            "Waveform data ready for clip %s (samples: %s)", clip_id, count
         )
 
         # Transaction id to group all deletes together
@@ -2491,7 +2472,9 @@ class TimelineView(updates.UpdateInterface, ViewClass):
             incoming_ui = ui_data.get("ui") if isinstance(ui_data, dict) else None
             incoming_audio = incoming_ui.get("audio_data") if isinstance(incoming_ui, dict) else None
             preserve_existing_waveform = (
-                incoming_audio is None and isinstance(existing_ui.get("audio_data"), list)
+                incoming_audio is None
+                and (isinstance(existing_ui.get("audio_data"), list)
+                     or is_reference(existing_ui.get("audio_data")))
             )
 
             # Preserve the current waveform preview while fresh waveform samples
@@ -2509,7 +2492,9 @@ class TimelineView(updates.UpdateInterface, ViewClass):
                 if not isinstance(clip_ui, dict):
                     clip_ui = {}
                     ui_data["ui"] = clip_ui
-                if not preserve_existing_waveform and isinstance(clip_ui.get("audio_data"), list):
+                if not preserve_existing_waveform and (
+                        isinstance(clip_ui.get("audio_data"), list)
+                        or is_reference(clip_ui.get("audio_data"))):
                     clip_ui["waveform_token"] = str(tid or self.get_uuid())
             clip.data = ui_data
             clip.save()
@@ -2519,6 +2504,20 @@ class TimelineView(updates.UpdateInterface, ViewClass):
 
         # Clear transaction id
         get_app().updates.transaction_id = None
+
+    def invalidate_file_thumbnails(self, file_id):
+        """Refresh dependent clip artwork without changing saved clip ranges."""
+        if not file_id:
+            return
+        clips = Clip.filter(file_id=file_id)
+        if ViewClass == TimelineWidget:
+            for clip in clips:
+                self.clip_painter.invalidate_clip_thumbnails(clip.id)
+            if clips:
+                self.update()
+        else:
+            for clip in clips:
+                self.run_js(JS_SCOPE_SELECTOR + '.updateThumbnail(' + json.dumps(clip.id) + ');')
 
     def Thumbnail_Updated(self, clip_id, thumbnail_frame=1):
         """Callback when thumbnail needs to be updated"""
@@ -2915,7 +2914,6 @@ class TimelineView(updates.UpdateInterface, ViewClass):
         elif property_name in effect_json:
             effect_json[property_name] = value
 
-    @feedback_command("adjustments")
     def _apply_effect_preset(self, class_name, preset_name, clip_ids):
         """Apply a simple Look effect preset, or remove the effect for the none preset."""
         presets = LOOK_EFFECT_PRESETS.get(class_name, {})
@@ -2975,7 +2973,6 @@ class TimelineView(updates.UpdateInterface, ViewClass):
             self.update_clip_data(clip.data, only_basic_props=False, ignore_reader=True)
             get_app().updates.apply_last_action_to_history(original_clip_data)
 
-    @feedback_command("adjustments")
     def Reset_Look_Triggered(self, clip_ids):
         """Remove all effects managed by the clip Look menu."""
         for clip_id in clip_ids:
@@ -3020,7 +3017,6 @@ class TimelineView(updates.UpdateInterface, ViewClass):
         effects.append(effect_json)
         return effect_json, True
 
-    @feedback_command("adjustments")
     def Color_Triggered(self, preset_name, clip_ids):
         """Apply or reset Color Grade presets for selected clips."""
         for clip_id in clip_ids:
@@ -3070,7 +3066,6 @@ class TimelineView(updates.UpdateInterface, ViewClass):
             self.update_clip_data(clip.data, only_basic_props=False, ignore_reader=True)
             get_app().updates.apply_last_action_to_history(original_clip_data)
 
-    @feedback_command("adjustments")
     def Film_Grain_Triggered(self, preset_name, clip_ids):
         """Apply Film Grain presets for selected clips."""
         for clip_id in clip_ids:
@@ -3223,7 +3218,6 @@ class TimelineView(updates.UpdateInterface, ViewClass):
             # Save changes
             self.update_clip_data(clip.data, only_basic_props=False, ignore_reader=True)
 
-    @feedback_command("adjustments")
     def Animate_Triggered(self, action, clip_ids, transaction_id=None):
         """Apply one-click motion presets to selected clips.
 
@@ -4011,6 +4005,14 @@ class TimelineView(updates.UpdateInterface, ViewClass):
         nudge_duration = float(action) / fps_float  # Nudge duration in seconds
         log.debug(f"Nudging by {nudge_duration} seconds")
 
+        items = (model.get(id=item_id) for ids, model in ((clip_ids, Clip), (tran_ids, Transition))
+                 for item_id in ids)
+        selected = [obj for obj in items if obj]
+        if not selected:
+            return
+        nudge_duration = max(nudge_duration, -min(obj.data['position'] for obj in selected))
+        transaction_id = str(uuid.uuid4())
+
         # Nudge all selected clips
         for clip_id in clip_ids:
             clip = Clip.get(id=clip_id)
@@ -4020,7 +4022,7 @@ class TimelineView(updates.UpdateInterface, ViewClass):
             # Apply the nudge and ensure the position doesn't go below 0
             new_position = max(clip.data['position'] + nudge_duration, 0.0)
             clip.data['position'] = new_position
-            self.update_clip_data(clip.data, only_basic_props=False, ignore_reader=True)
+            self.update_clip_data(clip.data, only_basic_props=False, ignore_reader=True, transaction_id=transaction_id)
 
         # Nudge all selected transitions
         for tran_id in tran_ids:
@@ -4031,7 +4033,7 @@ class TimelineView(updates.UpdateInterface, ViewClass):
             # Apply the nudge and ensure the position doesn't go below 0
             new_position = max(tran.data['position'] + nudge_duration, 0.0)
             tran.data['position'] = new_position
-            self.update_transition_data(tran.data, only_basic_props=False)
+            self.update_transition_data(tran.data, only_basic_props=False, transaction_id=transaction_id)
 
     def Align_Triggered(self, action, clip_ids, tran_ids):
         """Callback for alignment context menus"""
@@ -4116,7 +4118,6 @@ class TimelineView(updates.UpdateInterface, ViewClass):
             # Save changes
             self.update_transition_data(tran.data, only_basic_props=False)
 
-    @feedback_command("adjustments")
     def Fade_Triggered(self, action, clip_ids, position="Entire Clip", transaction_id=None):
         """Callback for fade context menus — fades both alpha (video) and volume (audio)"""
         log.debug(action)
@@ -4290,7 +4291,6 @@ class TimelineView(updates.UpdateInterface, ViewClass):
         elif trans_id:
             QTimer.singleShot(0, partial(self.Slice_Triggered, slice_mode, [], [trans_id], cursor_position, ripple))
 
-    @feedback_command("structure")
     def Slice_Triggered(self, action, clip_ids, trans_ids, playhead_position=0, ripple=False):
         """Callback for slice context menus"""
         # Get FPS from project
@@ -4314,11 +4314,25 @@ class TimelineView(updates.UpdateInterface, ViewClass):
             playhead_position = float(round((playhead_position * fps_num) / fps_den) * fps_den) / fps_num
             if action == MenuSlice.KEEP_LEFT: playhead_position += fps_den / fps_num
 
+            # Context menus can pass selected items outside the cut. Snapshot
+            # eligible items before ripple moves later items into the cut position.
+            def crosses_cut(item):
+                if item is None:
+                    return False
+                position = float(item.data["position"])
+                duration = float(item.data["end"]) - float(item.data["start"])
+                return position < playhead_position < position + duration
+
+            clips = [Clip.get(id=item_id) for item_id in clip_ids]
+            transitions = [Transition.get(id=item_id) for item_id in trans_ids]
+            clips = [item for item in clips if crosses_cut(item)]
+            transitions = [item for item in transitions if crosses_cut(item)]
+
             # Loop through each clip (using the list of ids)
-            for clip_id in clip_ids:
+            for clip in clips:
 
                 # Get existing clip object
-                clip = Clip.get(id=clip_id)
+                clip_id = clip.id
                 if not clip or clip.data.get("layer") in locked_layers:
                     continue
 
@@ -4392,8 +4406,8 @@ class TimelineView(updates.UpdateInterface, ViewClass):
             self.redraw_audio_timer.start()
 
             # Handle transitions (similar to clips)
-            for trans_id in trans_ids:
-                trans = Transition.get(id=trans_id)
+            for trans in transitions:
+                trans_id = trans.id
                 if not trans or trans.data.get("layer") in locked_layers:
                     continue
 
@@ -4483,7 +4497,6 @@ class TimelineView(updates.UpdateInterface, ViewClass):
             trans.data["position"] -= ripple_gap
             trans.save()
 
-    @feedback_command("adjustments")
     def Volume_Triggered(self, action, clip_ids, position="Entire Clip", level=1.0, transaction_id=None):
         """Callback for volume context menus"""
         log.debug(action)
@@ -5889,6 +5902,7 @@ class TimelineView(updates.UpdateInterface, ViewClass):
 
         new_clip["duration"] = duration_sec
         new_clip["end"] = end_sec
+        initialize_split_clip_keyframes(new_clip, fps_float)
 
         # Use the passed position and track directly
         new_clip["position"] = position.x()
@@ -6045,7 +6059,6 @@ class TimelineView(updates.UpdateInterface, ViewClass):
 
         # Callback function, to actually add the effect object
         def callback(self, effect_names, callback_data):
-            feedback_changed = False
             js_position = callback_data.get('position', 0.0)
             js_nearest_track = callback_data.get('track', 0)
 
@@ -6112,9 +6125,6 @@ class TimelineView(updates.UpdateInterface, ViewClass):
                     # Update clip data for project
                     self.update_clip_data(clip.data, only_basic_props=False, ignore_reader=True)
                     get_app().updates.apply_last_action_to_history(original_clip_data)
-                    feedback_changed = True
-            if feedback_changed:
-                record_feedback_action("effects")
 
         # Find position from javascript
         self.run_js(JS_SCOPE_SELECTOR + ".getJavaScriptPosition({}, {});"
@@ -6183,7 +6193,6 @@ class TimelineView(updates.UpdateInterface, ViewClass):
         effects.append(effect_json)
         self.update_clip_data(clip.data, only_basic_props=False, ignore_reader=True)
         get_app().updates.apply_last_action_to_history(original_clip_data)
-        record_feedback_action("effects")
 
     # Without defining this method, the 'copy' action doesn't show with cursor
     def dragMoveEvent(self, event):
