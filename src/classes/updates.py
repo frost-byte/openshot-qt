@@ -446,11 +446,20 @@ class UpdateManager:
         self.pending_action = None
         self.dispatch_action(self.last_action)
 
+    @staticmethod
+    def _slim(values):
+        """Drop embedded media metadata (ComfyUI workflows) before it reaches project data,
+        libopenshot or undo history."""
+        from classes.metadata_slim import slim_metadata, slimming_enabled
+        if isinstance(values, (dict, list)) and slimming_enabled():
+            slim_metadata(values)
+
     # Perform new actions, clearing redo history for taking a new path
     def insert(self, key, values):
         """ Insert a new UpdateAction into the UpdateManager
         (this action will then be distributed to all listeners) """
 
+        self._slim(values)
         self.last_action = UpdateAction('insert', key, values, transaction=self.transaction_id)
         if self.ignore_history:
             self.pending_action = self.last_action
@@ -464,6 +473,7 @@ class UpdateManager:
         """ Update the UpdateManager with an UpdateAction
         (this action will then be distributed to all listeners) """
 
+        self._slim(values)
         self.last_action = UpdateAction('update', key, values, transaction=self.transaction_id)
         if self.ignore_history:
             self.pending_action = self.last_action

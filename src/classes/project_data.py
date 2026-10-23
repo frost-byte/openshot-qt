@@ -594,6 +594,12 @@ class ProjectDataStore(JsonDataStore, UpdateInterface):
             # Upgrade any data structures
             self.upgrade_project_data_structures()
 
+            # Drop embedded media metadata (ComfyUI workflows) copied into
+            # files, clips and history; the original file is backed up first.
+            from classes.metadata_slim import slim_project, slimming_enabled
+            if slimming_enabled() and slim_project(self._data, file_path):
+                self.has_unsaved_changes = True
+
             # Get profile (if any)
             project_profile_desc = self._data.get("profile", "HD 720p 30 fps")
             profile = self.get_profile(profile_desc=project_profile_desc)

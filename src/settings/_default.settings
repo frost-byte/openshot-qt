@@ -677,6 +677,13 @@
     "setting": "automatic_transitions"
   },
   {
+    "value": true,
+    "title": "Slim Embedded Media Metadata (ComfyUI workflows)",
+    "category": "Performance",
+    "setting": "slim-media-metadata",
+    "type": "bool"
+  },
+  {
     "max": 4,
     "title": "Hardware Decoder Mode",
     "category": "Performance",
